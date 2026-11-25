@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 运行期数据
+_index_translate_home/
+*.db
+*.db-wal
+*.db-shm
+settings.json
+selftest.json
+crash.log
+index_translate_selftest.png
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
