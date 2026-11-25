@@ -58,7 +58,7 @@
 
 ## 下载与安装
 
-前往 **[Releases](https://github.com/4KAForever11/IndexTranslate-desktop/releases)** 下载：
+前往 **[发行版](https://github.com/4KAForever11/IndexTranslate-desktop/releases)** 下载：
 
 | 产物 | 适用场景 | 说明 |
 | --- | --- | --- |
@@ -230,7 +230,7 @@ python -m unittest discover -s tests
 
 ## 致谢与许可
 
-- 翻译服务由 **B 站 Index-Translate** 提供，遵循其公开使用条款。
+- 翻译服务由[B 站 Index-Translate](https://github.com/bilibili/Index-Translate)提供，遵循其公开使用条款。
 - 提示词与调用方式参考仓库内的 [`call_api.py`](call_api.py)。
 - 界面基于 [PyQt6-Fluent-Widgets](https://github.com/QtExcel/PyQt-Fluent-Widgets)。
 - 本项目以 MIT 许可证发布。
