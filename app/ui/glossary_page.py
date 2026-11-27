@@ -131,6 +131,10 @@ class GlossaryPage(PageWidget):
         self.table = TableWidget(self)
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["术语", "译法"])
+        for column in range(2):
+            header_item = self.table.horizontalHeaderItem(column)
+            if header_item is not None:
+                header_item.setTextAlignment(ALIGN_LEFT)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -199,6 +203,8 @@ class GlossaryPage(PageWidget):
         self.group_switch.setChecked(bool(enabled_map.get(self._current_group, True)))
         self.group_switch.blockSignals(blocked)
         settings.set("glossary_group", self._current_group)
+        # 新建 / 重命名 / 删除 / 停用分组后调用到这里，表格必须跟着切换
+        self.refresh()
 
     def _on_group_changed(self, _index: int) -> None:
         self._current_group = str(self.group_combo.currentData() or DEFAULT_GROUP)

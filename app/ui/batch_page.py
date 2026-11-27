@@ -58,6 +58,9 @@ FILTER = (
 
 EXPORT_MODES = [("bilingual", "双语对照"), ("target", "仅译文"), ("both", "原文 + 译文分节")]
 
+_ALIGN_LEFT = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+_SUMMARY_CHARS = 46
+
 
 class BatchRunner:
     """把每一项的每一段排进一个小并发池里跑。"""
@@ -213,6 +216,10 @@ class BatchPage(PageWidget):
         self.table = TableWidget(self)
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["文件", "状态", "进度", "用时", "摘要"])
+        for column in range(5):
+            header_item = self.table.horizontalHeaderItem(column)
+            if header_item is not None:
+                header_item.setTextAlignment(_ALIGN_LEFT)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -247,7 +254,8 @@ class BatchPage(PageWidget):
         tools_layout.addWidget(MutedLabel("并发", size=12))
         self.concurrency_spin = SpinBox()
         self.concurrency_spin.setRange(1, 4)
-        self.concurrency_spin.setFixedWidth(88)
+        # 88 px 会把数字挤成 0 宽（qfluentwidgets 的 SpinBox sizeHint ≈ 106）
+        self.concurrency_spin.setFixedWidth(120)
         self.concurrency_spin.setToolTip("同时进行的请求数；公网免费服务建议保持 1–2")
         self.concurrency_spin.setValue(int(settings.get("batch_concurrency", 1) or 1))
         tools_layout.addWidget(self.concurrency_spin)
@@ -403,13 +411,19 @@ class BatchPage(PageWidget):
         item = self.items[index]
         name_item = QTableWidgetItem(item.name)
         name_item.setToolTip(str(item.path))
+        name_item.setTextAlignment(_ALIGN_LEFT)
         self.table.setItem(index, 0, name_item)
         self.table.setItem(index, 1, QTableWidgetItem(STATUS_TEXT.get(item.status, item.status)))
         self.table.setItem(index, 2, QTableWidgetItem(f"{item.finished}/{item.total}"))
         self.table.setItem(
             index, 3, QTableWidgetItem(f"{item.elapsed_ms / 1000:.1f}s" if item.elapsed_ms else "—")
         )
-        self.table.setItem(index, 4, QTableWidgetItem(item.summary))
+        summary = item.summary
+        if len(summary) > _SUMMARY_CHARS:
+            summary = summary[:_SUMMARY_CHARS - 1].rstrip() + "…"
+        summary_item = QTableWidgetItem(summary)
+        summary_item.setToolTip(item.summary)
+        self.table.setItem(index, 4, summary_item)
 
     def refresh_row(self, index: int) -> None:
         if 0 <= index < len(self.items):
