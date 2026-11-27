@@ -15,10 +15,12 @@ from PyQt6.QtWidgets import (
 )
 from qfluentwidgets import (
     ComboBox,
+    DoubleSpinBox,
     HyperlinkButton,
     InfoBar,
     InfoBarPosition,
     LineEdit,
+    PasswordLineEdit,
     PrimaryPushButton,
     PushButton,
     SmoothScrollArea,
@@ -30,8 +32,10 @@ from qfluentwidgets import (
 )
 
 from ..core import settings
+from ..core.autostart import AutostartError, is_enabled as autostart_enabled
+from ..core.autostart import set_enabled as set_autostart
 from ..core.config import API_BASE, APP_PROJECT, MODELS, SERVICE_HOME, VERSION, data_dir
-from ..core.proxy_server import ProxyServer
+from ..core.proxy_manager import ProxyManager
 from .theme import Card, MutedLabel, PageWidget, TextLabel
 
 THEMES = [("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
@@ -44,12 +48,18 @@ def _title_label(text: str) -> QLabel:
 class SettingsPage(PageWidget):
     themeChanged = pyqtSignal(str)
     settingsChanged = pyqtSignal()
+    hotkeyChanged = pyqtSignal(str)
+    shotHotkeyChanged = pyqtSignal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, proxy_manager: ProxyManager, parent=None) -> None:
         super().__init__(parent)
-        self._proxy: ProxyServer | None = None
+        # 代理的所有权在 MainWindow，设置页只驱动它并展示状态。
+        self._proxy_manager = proxy_manager
         self._build_ui()
         self._sync_from_settings()
+        self._proxy_manager.started.connect(self._on_proxy_started)
+        self._proxy_manager.stopped.connect(self._on_proxy_stopped)
+        self._proxy_manager.failed.connect(self._on_proxy_failed)
 
     # --------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -74,7 +84,9 @@ class SettingsPage(PageWidget):
         layout.addWidget(self._build_service_card())
         layout.addWidget(self._build_behaviour_card())
         layout.addWidget(self._build_appearance_card())
+        layout.addWidget(self._build_system_card())
         layout.addWidget(self._build_proxy_card())
+        layout.addWidget(self._build_proxy_optimize_card())
         layout.addWidget(self._build_about_card())
         layout.addStretch(1)
 
@@ -183,6 +195,144 @@ class SettingsPage(PageWidget):
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         return card
 
+    def _build_system_card(self) -> Card:
+        card, body = self._card("系统集成")
+        body.addWidget(
+            MutedLabel(
+                "常驻托盘后，关掉窗口本地代理也不会断，全局快捷键随时可用。",
+                size=11,
+            )
+        )
+
+        self.tray_switch = SwitchButton()
+        self._row(
+            body,
+            "关闭窗口时最小化到托盘",
+            "关闭后程序继续在后台运行，单击托盘图标可回到主窗口",
+            self.tray_switch,
+        )
+
+        self.autostart_switch = SwitchButton()
+        self._row(
+            body,
+            "开机静默自启",
+            "登录 Windows 后直接进托盘，不弹出主窗口",
+            self.autostart_switch,
+        )
+
+        self.autostart_proxy_switch = SwitchButton()
+        self._row(
+            body,
+            "启动时自动开启本地代理",
+            "让沉浸式翻译等外部工具随时可用，无需手动点「启动」",
+            self.autostart_proxy_switch,
+        )
+
+        self.tray_switch.checkedChanged.connect(
+            lambda value: self._save("minimize_to_tray", bool(value))
+        )
+        self.autostart_proxy_switch.checkedChanged.connect(
+            lambda value: self._save("autostart_proxy", bool(value))
+        )
+        self.autostart_switch.checkedChanged.connect(self._on_autostart_toggled)
+
+        self.popup_switch = SwitchButton()
+        self._row(
+            body,
+            "全局划词浮窗",
+            "在任意程序里选中文字，按快捷键即可在鼠标旁弹出译文",
+            self.popup_switch,
+        )
+
+        hotkey_row = QHBoxLayout()
+        hotkey_row.setSpacing(8)
+        self.hotkey_edit = LineEdit()
+        self.hotkey_edit.setPlaceholderText("例如 Ctrl+Alt+T")
+        self.hotkey_edit.setClearButtonEnabled(True)
+        self.hotkey_edit.setFixedHeight(34)
+        self.hotkey_apply = PushButton("应用快捷键")
+        self.hotkey_apply.setMinimumWidth(112)
+        self.hotkey_apply.setFixedHeight(34)
+        hotkey_row.addWidget(_title_label("划词快捷键"))
+        hotkey_row.addWidget(self.hotkey_edit, 1)
+        hotkey_row.addWidget(self.hotkey_apply)
+        body.addLayout(hotkey_row)
+
+        self.hotkey_state = MutedLabel("", size=11)
+        body.addWidget(self.hotkey_state)
+
+        self.popup_switch.checkedChanged.connect(self._on_popup_toggled)
+        self.hotkey_apply.clicked.connect(self._apply_hotkey)
+        self.hotkey_edit.returnPressed.connect(self._apply_hotkey)
+
+        shot_row = QHBoxLayout()
+        shot_row.setSpacing(8)
+        self.shot_hotkey_edit = LineEdit()
+        self.shot_hotkey_edit.setPlaceholderText("例如 Ctrl+Alt+S")
+        self.shot_hotkey_edit.setClearButtonEnabled(True)
+        self.shot_hotkey_edit.setFixedHeight(34)
+        self.shot_hotkey_apply = PushButton("应用快捷键")
+        self.shot_hotkey_apply.setMinimumWidth(112)
+        self.shot_hotkey_apply.setFixedHeight(34)
+        shot_row.addWidget(_title_label("截屏快捷键"))
+        shot_row.addWidget(self.shot_hotkey_edit, 1)
+        shot_row.addWidget(self.shot_hotkey_apply)
+        body.addLayout(shot_row)
+
+        self.shot_hotkey_state = MutedLabel("", size=11)
+        body.addWidget(self.shot_hotkey_state)
+
+        self.shot_hotkey_apply.clicked.connect(self._apply_shot_hotkey)
+        self.shot_hotkey_edit.returnPressed.connect(self._apply_shot_hotkey)
+        return card
+
+    def _on_popup_toggled(self, checked: bool) -> None:
+        self._save("popup_enabled", bool(checked))
+        self.hotkeyChanged.emit(str(settings.get("popup_hotkey", "")) if checked else "")
+
+    def _apply_hotkey(self) -> None:
+        sequence = self.hotkey_edit.text().strip()
+        if not sequence:
+            InfoBar.warning(
+                title="快捷键不能为空",
+                content="例如 Ctrl+Alt+T。",
+                duration=3000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+            return
+        self._save("popup_hotkey", sequence)
+        self.hotkeyChanged.emit(sequence)
+
+    def report_hotkey(self, ok: bool, detail: str) -> None:
+        """MainWindow 注册完成后回写状态，避免界面显示"已生效"其实没注册上。"""
+        if ok:
+            self.hotkey_edit.setText(detail)
+            self.hotkey_state.setText(f"已生效：{detail}")
+        else:
+            self.hotkey_state.setText(detail)
+
+    def _apply_shot_hotkey(self) -> None:
+        sequence = self.shot_hotkey_edit.text().strip()
+        if not sequence:
+            InfoBar.warning(
+                title="快捷键不能为空",
+                content="例如 Ctrl+Alt+S。",
+                duration=3000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+            return
+        self._save("shot_hotkey", sequence)
+        self.shotHotkeyChanged.emit(sequence)
+
+    def report_shot_hotkey(self, ok: bool, detail: str) -> None:
+        if ok:
+            self.shot_hotkey_edit.setText(detail)
+            self.shot_hotkey_state.setText(f"已生效：{detail}")
+        else:
+            self.shot_hotkey_state.setText(detail)
+
     def _build_proxy_card(self) -> Card:
         card, body = self._card("本地代理（供沉浸式翻译等工具使用）")
         body.addWidget(
@@ -225,6 +375,115 @@ class SettingsPage(PageWidget):
         self.proxy_copy_button.clicked.connect(self._copy_proxy_url)
         return card
 
+    def _build_proxy_optimize_card(self) -> Card:
+        card, body = self._card("代理优化（限流 · 缓存 · 术语 · 降级）")
+        body.addWidget(
+            MutedLabel(
+                "沉浸式翻译打开长网页会瞬间发出几十个请求，最容易触发公网限流。"
+                "这里的限流与缓存就是为了把这种流量削平。",
+                size=11,
+            )
+        )
+
+        self.concurrency_spin = SpinBox()
+        self.concurrency_spin.setRange(1, 32)
+        self.concurrency_spin.setMinimumWidth(140)
+        self._row(body, "最大并发", "同时在途的上游请求数，越小越稳", self.concurrency_spin)
+
+        self.qps_spin = DoubleSpinBox()
+        self.qps_spin.setRange(0.0, 30.0)
+        self.qps_spin.setSingleStep(0.5)
+        self.qps_spin.setDecimals(1)
+        self.qps_spin.setMinimumWidth(140)
+        self._row(body, "每秒请求", "令牌桶速率，0 表示不限速", self.qps_spin)
+
+        cache_box = QWidget()
+        cache_row = QHBoxLayout(cache_box)
+        cache_row.setContentsMargins(0, 0, 0, 0)
+        cache_row.setSpacing(10)
+        self.cache_switch = SwitchButton()
+        self.cache_switch.setOnText("开")
+        self.cache_switch.setOffText("关")
+        self.cache_size_spin = SpinBox()
+        self.cache_size_spin.setRange(0, 50000)
+        self.cache_size_spin.setSingleStep(500)
+        self.cache_size_spin.setSuffix(" 条")
+        self.cache_size_spin.setMinimumWidth(140)
+        self.cache_clear_button = PushButton("清空")
+        self.cache_clear_button.setMinimumWidth(76)
+        cache_row.addWidget(self.cache_switch)
+        cache_row.addWidget(self.cache_size_spin)
+        cache_row.addWidget(self.cache_clear_button)
+        cache_row.addStretch(1)
+        self._row(
+            body,
+            "结果缓存",
+            "原文与参数都相同时直接命中，网页刷新后再也不打上游",
+            cache_box,
+        )
+        self.cache_state = MutedLabel("缓存未启用", size=11)
+        body.addWidget(self.cache_state)
+
+        self.glossary_inject_switch = SwitchButton()
+        self.glossary_inject_switch.setOnText("开")
+        self.glossary_inject_switch.setOffText("关")
+        self._row(
+            body,
+            "注入术语表",
+            "命中术语表的词条会自动加进发往模型的提示词",
+            self.glossary_inject_switch,
+        )
+
+        self.fallback_switch = SwitchButton()
+        self.fallback_switch.setOnText("开")
+        self.fallback_switch.setOffText("关")
+        self._row(
+            body,
+            "模型自动降级",
+            "35B 遇到 429 / 5xx / 超时时自动改用 9B，再退到 2B",
+            self.fallback_switch,
+        )
+
+        self.fallback_base_edit = LineEdit()
+        self.fallback_base_edit.setPlaceholderText("http://127.0.0.1:11434/v1")
+        self._row(
+            body,
+            "备用端点",
+            "留空则只走内置降级；可填 Ollama / 硅基流动 / DeepSeek 的接口地址",
+            self.fallback_base_edit,
+        )
+
+        self.fallback_model_edit = LineEdit()
+        self.fallback_model_edit.setPlaceholderText("qwen2.5:7b / deepseek-chat")
+        self._row(body, "备用模型", "调用备用端点时使用的模型名", self.fallback_model_edit)
+
+        self.fallback_key_edit = PasswordLineEdit()
+        self.fallback_key_edit.setPlaceholderText("本地 Ollama 可留空")
+        self._row(body, "备用密钥", "以 Authorization: Bearer 发送，仅保存在本机 settings.json", self.fallback_key_edit)
+
+        self.concurrency_spin.valueChanged.connect(
+            lambda value: self._save("proxy_max_concurrency", int(value))
+        )
+        self.qps_spin.valueChanged.connect(lambda value: self._save("proxy_qps", float(value)))
+        self.cache_switch.checkedChanged.connect(self._on_cache_toggled)
+        self.cache_size_spin.valueChanged.connect(self._on_cache_size_changed)
+        self.cache_clear_button.clicked.connect(self._clear_cache)
+        self.glossary_inject_switch.checkedChanged.connect(
+            lambda value: self._save("proxy_inject_glossary", bool(value))
+        )
+        self.fallback_switch.checkedChanged.connect(
+            lambda value: self._save("proxy_fallback", bool(value))
+        )
+        for edit, key, strip in (
+            (self.fallback_base_edit, "fallback_api_base", True),
+            (self.fallback_model_edit, "fallback_model", True),
+            (self.fallback_key_edit, "fallback_api_key", False),
+        ):
+            edit.editingFinished.connect(
+                lambda e=edit, k=key, s=strip: self._save(k, e.text().strip() if s else e.text())
+            )
+        return card
+
     def _build_about_card(self) -> Card:
         card, body = self._card("关于")
         body.addWidget(MutedLabel(f"{APP_PROJECT} {VERSION} · 本地运行的翻译客户端", size=12))
@@ -255,6 +514,25 @@ class SettingsPage(PageWidget):
         self.instruction_edit.setText(str(settings.get("instruction", "") or ""))
         self._select_data(self.theme_combo, settings.get("theme", "auto"))
         self.port_spin.setValue(int(settings.get("proxy_port", 8080) or 8080))
+        self.tray_switch.setChecked(bool(settings.get("minimize_to_tray", True)))
+        self.autostart_switch.setChecked(autostart_enabled())
+        self.autostart_proxy_switch.setChecked(bool(settings.get("autostart_proxy", True)))
+        self.popup_switch.setChecked(bool(settings.get("popup_enabled", True)))
+        self.hotkey_edit.setText(str(settings.get("popup_hotkey", "Ctrl+Alt+T") or ""))
+        self.shot_hotkey_edit.setText(str(settings.get("shot_hotkey", "Ctrl+Alt+S") or ""))
+        self.concurrency_spin.setValue(int(settings.get("proxy_max_concurrency", 4) or 1))
+        self.qps_spin.setValue(float(settings.get("proxy_qps", 3.0) or 0.0))
+        cache_on = bool(settings.get("proxy_cache", True))
+        self.cache_switch.setChecked(cache_on)
+        self.cache_size_spin.setValue(int(settings.get("proxy_cache_size", 2000) or 0))
+        self.cache_size_spin.setEnabled(cache_on)
+        self.cache_clear_button.setEnabled(cache_on)
+        self.glossary_inject_switch.setChecked(bool(settings.get("proxy_inject_glossary", True)))
+        self.fallback_switch.setChecked(bool(settings.get("proxy_fallback", True)))
+        self.fallback_base_edit.setText(str(settings.get("fallback_api_base", "") or ""))
+        self.fallback_model_edit.setText(str(settings.get("fallback_model", "") or ""))
+        self.fallback_key_edit.setText(str(settings.get("fallback_api_key", "") or ""))
+        self.sync_proxy_state()
 
     @staticmethod
     def _select_data(combo: ComboBox, value) -> None:
@@ -269,6 +547,10 @@ class SettingsPage(PageWidget):
     def _save(self, key: str, value) -> None:
         settings.set(key, value)
         settings.save()
+        if key.startswith("proxy_") or key.startswith("fallback_"):
+            # 限流/缓存/降级都是热更新，不必重启代理
+            self._proxy_manager.apply_settings()
+            self.refresh_proxy_stats()
         self.settingsChanged.emit()
 
     # ----------------------------------------------------------------- handlers
@@ -285,8 +567,7 @@ class SettingsPage(PageWidget):
             self.api_edit.setText(str(settings.get("api_base", API_BASE)))
             return
         self._save("api_base", value.rstrip("/"))
-        if self._proxy is not None and self._proxy.running:
-            self._proxy.update(api_base=value.rstrip("/"))
+        self._proxy_manager.apply_settings()
 
     def _reset_api_base(self) -> None:
         self.api_edit.setText(API_BASE)
@@ -297,8 +578,7 @@ class SettingsPage(PageWidget):
         if not model:
             return
         self._save("model", model)
-        if self._proxy is not None and self._proxy.running:
-            self._proxy.update(model=model)
+        self._proxy_manager.apply_settings()
 
     def _save_instruction(self) -> None:
         self._save("instruction", self.instruction_edit.text().strip())
@@ -312,51 +592,127 @@ class SettingsPage(PageWidget):
 
     def _on_port_changed(self, value: int) -> None:
         self._save("proxy_port", int(value))
-        if self._proxy is not None and self._proxy.running:
-            self._proxy.stop()
-            self._proxy = None
-            self.proxy_button.setText("启动")
-            self.proxy_url_edit.clear()
-            self.proxy_copy_button.setEnabled(False)
+        if self._proxy_manager.running:
+            self._proxy_manager.stop()
             self.proxy_state.setText("端口已修改，代理已停止，请重新启动。")
 
     def _toggle_proxy(self) -> None:
-        if self._proxy is not None and self._proxy.running:
-            self._proxy.stop()
-            self._proxy = None
-            self.proxy_button.setText("启动")
-            self.proxy_copy_button.setEnabled(False)
-            self.proxy_state.setText("未启动")
-            self.proxy_url_edit.clear()
+        if self._proxy_manager.running:
+            self._proxy_manager.stop()
             return
 
-        proxy = ProxyServer(
-            port=int(self.port_spin.value()),
-            api_base=str(settings.get("api_base", API_BASE)),
-            model=str(settings.get("model", "")),
-            timeout=float(settings.get("timeout", 120) or 120),
+        if not self._proxy_manager.start():
+            return  # 失败提示由 failed 信号统一给出
+
+        InfoBar.success(
+            title="代理已启动",
+            content="把其他工具的接口地址设为上方地址即可。",
+            duration=3000,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
         )
+
+    # --------------------------------------------------------- proxy feedback
+    def _on_proxy_started(self, url: str) -> None:
+        self.proxy_button.setText("停止")
+        self.proxy_url_edit.setText(url)
+        self.proxy_copy_button.setEnabled(True)
+        self.proxy_state.setText("运行中：仅监听本机 127.0.0.1，已在请求中固定关闭思考模式。")
+
+    def _on_proxy_stopped(self) -> None:
+        self.proxy_button.setText("启动")
+        self.proxy_url_edit.clear()
+        self.proxy_copy_button.setEnabled(False)
+        self.proxy_state.setText("未启动")
+
+    def _on_proxy_failed(self, message: str) -> None:
+        self.proxy_state.setText(f"启动失败：{message}")
+        InfoBar.error(
+            title="代理启动失败",
+            content=message,
+            duration=5000,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )
+
+    def sync_proxy_state(self) -> None:
+        """外部（托盘菜单/自动启动）改动代理后刷新界面。"""
+        if self._proxy_manager.running:
+            self._on_proxy_started(self._proxy_manager.url)
+        else:
+            self._on_proxy_stopped()
+        self.refresh_proxy_stats()
+
+    # --------------------------------------------------- proxy optimisation UI
+    def _on_cache_toggled(self, checked: bool) -> None:
+        self._save("proxy_cache", bool(checked))
+        self.cache_size_spin.setEnabled(bool(checked))
+        self.cache_clear_button.setEnabled(bool(checked))
+        self.refresh_proxy_stats()
+
+    def _on_cache_size_changed(self, value: int) -> None:
+        settings.set("proxy_cache_size", int(value))
+        settings.save()
+        self._proxy_manager.apply_settings()
+
+    def _clear_cache(self) -> None:
+        removed = self._proxy_manager.clear_cache()
+        if removed:
+            content = f"已清空 {removed} 条缓存。"
+        elif self._proxy_manager.running:
+            content = "缓存本来就是空的。"
+        else:
+            content = "代理未启动，缓存随代理一起位于数据目录中。"
+        InfoBar.success(
+            title="缓存已清空",
+            content=content,
+            duration=2500,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )
+        self.refresh_proxy_stats()
+
+    def refresh_proxy_stats(self) -> None:
+        """把真实运行数据回填到缓存状态行（只在代理运行时）。"""
+        if not hasattr(self, "cache_state"):
+            return
+        if not self._proxy_manager.running:
+            self.cache_state.setText(
+                "代理未启动：启动后可查看命中统计。" if settings.get("proxy_cache", True) else "缓存已关闭"
+            )
+            return
+        stats = self._proxy_manager.stats() or {}
+        cache = stats.get("cache") or {}
+        gate = stats.get("gate") or {}
+        lookups = int(cache.get("lookups", 0) or 0)
+        hits = int(cache.get("hits", 0) or 0)
+        rate = (hits / lookups * 100.0) if lookups else 0.0
+        entries = int(cache.get("entries", 0) or 0)
+        served = int(gate.get("served", 0) or 0)
+        rejected = int(gate.get("rejected", 0) or 0)
+        self.cache_state.setText(
+            f"缓存 {entries} 条 · 命中 {hits}/{lookups}（{rate:.0f}%） · "
+            f"已处理 {served} 个请求 · 排队超时 {rejected} 次"
+        )
+
+    def _on_autostart_toggled(self, checked: bool) -> None:
         try:
-            url = proxy.start()
-        except RuntimeError as exc:
+            set_autostart(bool(checked))
+        except AutostartError as exc:
             InfoBar.error(
-                title="代理启动失败",
+                title="开机自启设置失败",
                 content=str(exc),
                 duration=5000,
                 position=InfoBarPosition.TOP_RIGHT,
                 parent=self,
             )
+            self.autostart_switch.setChecked(autostart_enabled())
             return
-
-        self._proxy = proxy
-        self.proxy_button.setText("停止")
-        self.proxy_url_edit.setText(url)
-        self.proxy_copy_button.setEnabled(True)
-        self.proxy_state.setText("运行中：仅监听本机 127.0.0.1，已在请求中固定关闭思考模式。")
+        self._save("autostart", bool(checked))
         InfoBar.success(
-            title="代理已启动",
-            content="把其他工具的接口地址设为上方地址即可。",
-            duration=3000,
+            title="已开启开机自启" if checked else "已关闭开机自启",
+            content="登录 Windows 后会静默启动到托盘。" if checked else "下次登录不再自动启动。",
+            duration=2400,
             position=InfoBarPosition.TOP_RIGHT,
             parent=self,
         )
@@ -396,6 +752,8 @@ class SettingsPage(PageWidget):
             settings.set(key, value)
         settings.save()
         self._sync_from_settings()
+        self._proxy_manager.apply_settings()
+        self.refresh_proxy_stats()
         self.settingsChanged.emit()
         self.themeChanged.emit(str(settings.get("theme", "auto")))
         InfoBar.success(
@@ -408,6 +766,6 @@ class SettingsPage(PageWidget):
 
     # ------------------------------------------------------------------ cleanup
     def shutdown(self) -> None:
-        if self._proxy is not None:
-            self._proxy.stop()
-            self._proxy = None
+        # 代理由 MainWindow 持有并在退出时统一停止，这里只重置展示状态。
+        self.proxy_url_edit.clear()
+        self.proxy_copy_button.setEnabled(False)

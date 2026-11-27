@@ -26,6 +26,11 @@ Set-Location $root
 $python = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "python" }
 $appName = "IndexTranslate-desktop"
 
+# 版本号只维护 app/core/config.py 一处，打包产物自动跟随
+$versionMatch = Select-String -Path "app\core\config.py" -Pattern '^VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+$version = if ($versionMatch) { $versionMatch.Matches[0].Groups[1].Value } else { "0.0.0" }
+Write-Host "version: $version" -ForegroundColor DarkGray
+
 Write-Host "[1/4] icon" -ForegroundColor Cyan
 if (-not (Test-Path "assets\icon.ico")) {
     & $python tools\make_icon.py
@@ -55,19 +60,24 @@ function Invoke-PyInstaller {
     if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed with exit code $LASTEXITCODE" }
 }
 
-function New-Release {
+function New-FolderZip {
     param([string]$Version)
-    Write-Host "[3/4] release assets" -ForegroundColor Cyan
-    $outDir = "dist"
-    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-
-    $zip = Join-Path $outDir "$appName-$Version-win64.zip"
+    Write-Host "[3/4] zip folder build" -ForegroundColor Cyan
+    $folder = Join-Path "dist" $appName
+    if (-not (Test-Path $folder)) { return }
+    $zip = Join-Path "dist" "$appName-$Version-win64.zip"
     if (Test-Path $zip) { Remove-Item $zip -Force }
-    $folder = Join-Path $outDir $appName
-    if (Test-Path $folder) {
-        Compress-Archive -Path $folder -DestinationPath $zip -Force
-        Write-Host ("OK  {0}  ({1} MB)" -f $zip, [math]::Round((Get-Item $zip).Length / 1MB, 1)) -ForegroundColor Green
-    }
+    Compress-Archive -Path $folder -DestinationPath $zip -Force
+    Write-Host ("OK  {0}  ({1} MB)" -f $zip, [math]::Round((Get-Item $zip).Length / 1MB, 1)) -ForegroundColor Green
+}
+
+function New-OneFileAlias {
+    param([string]$Version)
+    $exe = Join-Path "dist" "$appName.exe"
+    if (-not (Test-Path $exe)) { return }
+    $alias = Join-Path "dist" "$appName-$Version-win64-onefile.exe"
+    Copy-Item $exe $alias -Force
+    Write-Host ("OK  {0}  ({1} MB)" -f $alias, [math]::Round((Get-Item $alias).Length / 1MB, 1)) -ForegroundColor Green
 }
 
 $buildFolder = -not $OneFile -or $Both
@@ -78,6 +88,7 @@ if ($buildFolder) {
     $exe = "dist\$appName\$appName.exe"
     if (-not (Test-Path $exe)) { throw "expected $exe was not produced" }
     Write-Host ("OK  {0}  ({1} MB)" -f $exe, [math]::Round((Get-Item $exe).Length / 1MB, 1)) -ForegroundColor Green
+    New-FolderZip -Version $version
 }
 
 if ($buildFile) {
@@ -87,6 +98,7 @@ if ($buildFile) {
     $exe = "dist\$appName.exe"
     if (-not (Test-Path $exe)) { throw "expected $exe was not produced" }
     Write-Host ("OK  {0}  ({1} MB)" -f $exe, [math]::Round((Get-Item $exe).Length / 1MB, 1)) -ForegroundColor Green
+    New-OneFileAlias -Version $version
 }
 
 Write-Host "[4/4] done" -ForegroundColor Cyan

@@ -15,6 +15,7 @@ from typing import Optional
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from ..core.api_client import ApiError, ResponseHandle, translate
+from ..core.config import settings
 from ..core.image_utils import (
     fetch_remote_image,
     make_thumbnail,
@@ -45,6 +46,36 @@ class TranslationRequest:
     thumbnail: Optional[bytes] = None
     kind: str = "text"
     meta: dict = field(default_factory=dict)
+
+
+def build_request(
+    *,
+    text: str = "",
+    glossary: str = "",
+    target_lang: str | None = None,
+    source_lang: str | None = None,
+    image_path: str = "",
+    image_url: str = "",
+    image_qimage: object = None,
+    kind: str = "text",
+) -> TranslationRequest:
+    """按当前设置组装请求，供浮窗 / 剪贴板监听等非主页入口复用。"""
+    return TranslationRequest(
+        text=text,
+        target_lang=str(target_lang or settings.get("target_lang", "zh") or "zh"),
+        source_lang=str(source_lang or settings.get("source_lang", "auto") or "auto"),
+        instruction=str(settings.get("instruction", "") or ""),
+        glossary=glossary,
+        model=str(settings.get("model", "") or ""),
+        api_base=str(settings.get("api_base", "") or ""),
+        timeout=float(settings.get("timeout", 120) or 120),
+        stream=bool(settings.get("stream", True)),
+        temperature=float(settings.get("temperature", 0.0) or 0.0),
+        image_path=image_path,
+        image_url=image_url,
+        image_qimage=image_qimage,
+        kind=kind,
+    )
 
 
 class TranslationWorker(QThread):

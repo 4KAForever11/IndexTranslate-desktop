@@ -16,7 +16,7 @@ from typing import Any
 APP_NAME = "IndexTranslate desktop"
 APP_PROJECT = "IndexTranslate-desktop"
 APP_SLUG = "IndexTranslate"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 API_BASE = "https://index-translate.bilibili.com/v1"
 SERVICE_HOME = "https://index-translate.bilibili.com/site/home.html"
@@ -96,7 +96,38 @@ DEFAULTS: dict[str, Any] = {
     "use_glossary": True,
     "timeout": 120,
     "proxy_port": 8080,
+    # 代理优化：限流 / 缓存 / 术语注入 / 模型降级
+    "proxy_max_concurrency": 4,
+    "proxy_qps": 3.0,            # 0 = 不限速
+    "proxy_cache": True,
+    "proxy_cache_size": 2000,
+    "proxy_inject_glossary": True,
+    "proxy_fallback": True,
+    "fallback_api_base": "",     # 自定义备用端点（Ollama / 硅基流动 …）
+    "fallback_model": "",
+    "fallback_api_key": "",
     "advanced_open": False,
+    "minimize_to_tray": True,   # 关闭窗口时收进托盘而不是退出
+    "autostart": False,         # 开机静默启动（写 HKCU Run 项）
+    "autostart_proxy": True,    # 静默启动时自动拉起本地代理
+    "tray_tip_shown": False,    # 只提示一次「程序还在托盘里运行」
+    "popup_enabled": True,      # 全局划词浮窗
+    "popup_hotkey": "Ctrl+Alt+T",
+    "shot_hotkey": "Ctrl+Alt+S",  # 框选截屏翻译
+    "always_on_top": False,     # 窗口置顶
+    "clipboard_watch": False,   # 剪贴板实时监听
+    # 风格预设（空列表 = 使用 app/core/styles.py 里的内置预设）
+    "styles": [],
+    "active_style": "plain",
+    # 术语表：当前分组（分组本身与启用状态存在 glossary.db 里）
+    "glossary_group": "默认",
+    # 输入草稿：防抖保存，重启后恢复
+    "draft": {"text": "", "source_lang": "", "target_lang": "", "model": ""},
+    "draft_enabled": True,
+    # 批量翻译
+    "batch_concurrency": 1,
+    "batch_export": "bilingual",   # bilingual | target | both
+    "batch_last_dir": "",
     "window_geometry": "",
     "window_state": "",
 }

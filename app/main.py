@@ -145,13 +145,21 @@ def main() -> int:
 
     _install_excepthook()
 
+    # 托盘常驻：关掉最后一个窗口不等于退出进程，退出走托盘菜单的「退出」。
+    QApplication.setQuitOnLastWindowClosed(False)
+
     window = MainWindow()
-    window.show()
+    silent = "--silent" in sys.argv
+    window.start_background_services()
 
     if "--selftest" in sys.argv:
+        window.show()
         code = _selftest(app, window)
         window.close()
         return code
+
+    if not silent:
+        window.show()
     return app.exec()
 
 

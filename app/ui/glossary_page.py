@@ -1,4 +1,8 @@
-"""Glossary editor: term → preferred translation, injected into every prompt."""
+"""Glossary editor: term → preferred translation, injected into every prompt.
+
+术语按「分组 / 场景」组织：同一句原文在不同领域可以有不同译法，只有启用的
+分组会参与注入，注入时还只挑原文真正命中的词条。
+"""
 
 from __future__ import annotations
 
@@ -10,27 +14,34 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QTableWidgetItem,
     QVBoxLayout,
-    QWidget,
 )
 from qfluentwidgets import (
+    ComboBox,
     InfoBar,
     InfoBarPosition,
     LineEdit,
+    MessageBox,
     PrimaryPushButton,
     PushButton,
     SearchLineEdit,
+    SwitchButton,
     TitleLabel,
 )
 
-from ..core.glossary_db import GlossaryDB
+from ..core import settings
+from ..core.glossary_db import DEFAULT_GROUP, GlossaryDB
 from .theme import Card, MutedLabel, PageWidget
 
 try:  # fluent's styled table; plain Qt table is a safe fallback
     from qfluentwidgets import TableWidget
 except ImportError:  # pragma: no cover
     from PyQt6.QtWidgets import QTableWidget as TableWidget  # type: ignore
+
+
+ALIGN_LEFT = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
 
 class GlossaryPage(PageWidget):
@@ -40,9 +51,12 @@ class GlossaryPage(PageWidget):
         super().__init__(parent)
         self.glossary_db = glossary_db
         self._loading = False
+        self._current_group = DEFAULT_GROUP
         self._build_ui()
+        self._reload_groups()
         self.refresh()
 
+    # --------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 20, 24, 18)
@@ -56,7 +70,7 @@ class GlossaryPage(PageWidget):
         header.addStretch(1)
         self.search = SearchLineEdit()
         self.search.setPlaceholderText("筛选术语")
-        self.search.setMinimumWidth(200)
+        self.search.setMinimumWidth(180)
         self.import_button = PushButton("导入")
         self.export_button = PushButton("导出")
         self.delete_button = PushButton("删除所选")
@@ -64,10 +78,34 @@ class GlossaryPage(PageWidget):
             header.addWidget(widget)
         outer.addLayout(header)
 
+        group_card = Card(radius=8)
+        group_layout = QHBoxLayout(group_card)
+        group_layout.setContentsMargins(14, 10, 14, 10)
+        group_layout.setSpacing(10)
+
+        group_layout.addWidget(MutedLabel("分组 / 场景", size=12))
+        self.group_combo = ComboBox()
+        self.group_combo.setMinimumWidth(160)
+        self.group_combo.setToolTip("不同领域可以各用一套术语，互不干扰")
+        group_layout.addWidget(self.group_combo)
+
+        self.group_switch = SwitchButton()
+        self.group_switch.setOnText("启用")
+        self.group_switch.setOffText("停用")
+        self.group_switch.setToolTip("停用的分组不会注入提示词")
+        group_layout.addWidget(self.group_switch)
+
+        self.new_group_button = PushButton("新建分组")
+        self.rename_group_button = PushButton("重命名")
+        self.delete_group_button = PushButton("删除分组")
+        group_layout.addStretch(1)
+        for widget in (self.new_group_button, self.rename_group_button, self.delete_group_button):
+            group_layout.addWidget(widget)
+        outer.addWidget(group_card)
+
         outer.addWidget(
             MutedLabel(
-                "术语表会以「硬性要求」的形式附加到每次翻译，适合人名、品牌名、产品名。"
-                "支持「原文→译文」或「原文=译文」格式的文本文件。",
+                "只有启用的分组、并且原文里真的出现过的术语才会写进提示词，既避免跨领域冲突，也减少首字延迟。",
                 size=12,
             )
         )
@@ -127,13 +165,104 @@ class GlossaryPage(PageWidget):
         self.import_button.clicked.connect(self._import_file)
         self.export_button.clicked.connect(self._export_file)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.group_combo.currentIndexChanged.connect(self._on_group_changed)
+        self.group_switch.checkedChanged.connect(self._on_group_toggled)
+        self.new_group_button.clicked.connect(self._create_group)
+        self.rename_group_button.clicked.connect(self._rename_group)
+        self.delete_group_button.clicked.connect(self._delete_group)
+
+    # ------------------------------------------------------------------ groups
+    @property
+    def current_group(self) -> str:
+        return self._current_group
+
+    def _reload_groups(self, select: str = "") -> None:
+        groups = self.glossary_db.groups()
+        if not groups:
+            self.glossary_db.ensure_group(DEFAULT_GROUP)
+            groups = self.glossary_db.groups()
+        wanted = select or str(settings.get("glossary_group", DEFAULT_GROUP) or DEFAULT_GROUP)
+
+        blocked = self.group_combo.blockSignals(True)
+        self.group_combo.clear()
+        for name, enabled in groups:
+            self.group_combo.addItem(f"{name}{'' if enabled else '（已停用）'}", userData=name)
+        index = self.group_combo.findData(wanted)
+        if index < 0:
+            index = 0
+        self.group_combo.setCurrentIndex(index)
+        self.group_combo.blockSignals(blocked)
+
+        self._current_group = str(self.group_combo.currentData() or DEFAULT_GROUP)
+        enabled_map = dict(groups)
+        blocked = self.group_switch.blockSignals(True)
+        self.group_switch.setChecked(bool(enabled_map.get(self._current_group, True)))
+        self.group_switch.blockSignals(blocked)
+        settings.set("glossary_group", self._current_group)
+
+    def _on_group_changed(self, _index: int) -> None:
+        self._current_group = str(self.group_combo.currentData() or DEFAULT_GROUP)
+        settings.set("glossary_group", self._current_group)
+        settings.save()
+        enabled_map = dict(self.glossary_db.groups())
+        blocked = self.group_switch.blockSignals(True)
+        self.group_switch.setChecked(bool(enabled_map.get(self._current_group, True)))
+        self.group_switch.blockSignals(blocked)
+        self.refresh()
+
+    def _on_group_toggled(self, checked: bool) -> None:
+        self.glossary_db.set_group_enabled(self._current_group, checked)
+        self._reload_groups(self._current_group)
+        self.changed.emit()
+        InfoBar.success(
+            title="已启用" if checked else "已停用",
+            content=f"「{self._current_group}」分组{'会' if checked else '不会'}参与提示词注入。",
+            duration=2200,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )
+
+    def _create_group(self) -> None:
+        name, ok = QInputDialog.getText(self, "新建分组", "分组名称（例如：游戏、开发、医学）")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        self.glossary_db.ensure_group(name)
+        self._reload_groups(name)
+        self.refresh()
+        self.changed.emit()
+
+    def _rename_group(self) -> None:
+        old = self._current_group
+        name, ok = QInputDialog.getText(self, "重命名分组", "新的分组名称", text=old)
+        name = (name or "").strip()
+        if not ok or not name or name == old:
+            return
+        self.glossary_db.rename_group(old, name)
+        self._reload_groups(name)
+        self.refresh()
+        self.changed.emit()
+
+    def _delete_group(self) -> None:
+        group = self._current_group
+        box = MessageBox(
+            "删除分组",
+            f"将删除「{group}」分组及其中的 {self.glossary_db.count(group)} 条术语，此操作不可撤销。",
+            self.window(),
+        )
+        if not box.exec():
+            return
+        self.glossary_db.delete_group(group)
+        self._reload_groups(DEFAULT_GROUP)
+        self.refresh()
+        self.changed.emit()
 
     # ------------------------------------------------------------------- table
     def refresh(self) -> None:
         keyword = self.search.text().strip().lower()
         terms = [
             (term, translation)
-            for term, translation in self.glossary_db.all()
+            for term, translation in self.glossary_db.all(self._current_group)
             if not keyword or keyword in term.lower() or keyword in translation.lower()
         ]
         self._loading = True
@@ -142,11 +271,16 @@ class GlossaryPage(PageWidget):
             for row, (term, translation) in enumerate(terms):
                 term_item = QTableWidgetItem(term)
                 term_item.setFlags(term_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                term_item.setTextAlignment(ALIGN_LEFT)
                 self.table.setItem(row, 0, term_item)
-                self.table.setItem(row, 1, QTableWidgetItem(translation))
+                value_item = QTableWidgetItem(translation)
+                value_item.setTextAlignment(ALIGN_LEFT)
+                self.table.setItem(row, 1, value_item)
         finally:
             self._loading = False
-        self.count_label.setText(f"{self.glossary_db.count()} 条")
+        total = self.glossary_db.count()
+        current = self.glossary_db.count(self._current_group)
+        self.count_label.setText(f"{self._current_group} {current} 条 · 全部 {total} 条")
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if self._loading or item.column() != 1:
@@ -157,7 +291,7 @@ class GlossaryPage(PageWidget):
         term = term_item.text().strip()
         if not term:
             return
-        self.glossary_db.upsert(term, item.text().strip())
+        self.glossary_db.upsert(term, item.text().strip(), self._current_group)
         self.changed.emit()
 
     # ----------------------------------------------------------------- actions
@@ -172,7 +306,7 @@ class GlossaryPage(PageWidget):
                 parent=self,
             )
             return
-        self.glossary_db.upsert(term, self.value_edit.text().strip())
+        self.glossary_db.upsert(term, self.value_edit.text().strip(), self._current_group)
         self.term_edit.clear()
         self.value_edit.clear()
         self.refresh()
@@ -193,7 +327,7 @@ class GlossaryPage(PageWidget):
         for row in rows:
             item = self.table.item(row, 0)
             if item is not None:
-                self.glossary_db.delete(item.text())
+                self.glossary_db.delete(item.text(), self._current_group)
         self.refresh()
         self.changed.emit()
 
@@ -218,12 +352,12 @@ class GlossaryPage(PageWidget):
         if not text:
             self._error("无法识别文件编码，请另存为 UTF-8 后重试。")
             return
-        added = self.glossary_db.import_lines(text.splitlines())
+        added = self.glossary_db.import_lines(text.splitlines(), self._current_group)
         self.refresh()
         self.changed.emit()
         InfoBar.success(
             title="导入完成",
-            content=f"已写入 {added} 条术语。",
+            content=f"已写入「{self._current_group}」分组 {added} 条术语。",
             duration=2600,
             position=InfoBarPosition.TOP_RIGHT,
             parent=self,
@@ -231,18 +365,23 @@ class GlossaryPage(PageWidget):
 
     def _export_file(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出术语表", "术语表.txt", "文本文件 (*.txt);;所有文件 (*.*)"
+            self,
+            "导出术语表",
+            f"术语表-{self._current_group}.txt",
+            "文本文件 (*.txt);;所有文件 (*.*)",
         )
         if not path:
             return
         try:
-            Path(path).write_text(self.glossary_db.export_text(), encoding="utf-8")
+            Path(path).write_text(
+                self.glossary_db.export_text(self._current_group), encoding="utf-8"
+            )
         except OSError as exc:
             self._error(f"写入失败：{exc}")
             return
         InfoBar.success(
             title="导出完成",
-            content="术语表已按「原文→译文」保存。",
+            content=f"「{self._current_group}」分组已按「原文→译文」保存。",
             duration=2600,
             position=InfoBarPosition.TOP_RIGHT,
             parent=self,

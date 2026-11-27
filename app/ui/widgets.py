@@ -13,8 +13,17 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import LineEdit, PrimaryPushButton, PushButton
+from qfluentwidgets import (
+    FluentIcon,
+    FlowLayout,
+    LineEdit,
+    PrimaryPushButton,
+    PushButton,
+    TogglePushButton,
+    TransparentToolButton,
+)
 
+from ..core.styles import MAX_STYLE_NAME, default_styles, new_style_id
 from .theme import MutedLabel, ThemedLabel, colors, on_theme_changed
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
@@ -59,6 +68,177 @@ class UrlInputDialog(QDialog):
     def url(self) -> str:
         return self.url_edit.text().strip()
 
+
+class StyleChipBar(QWidget):
+    """一排风格预设芯片：点一下就把对应的指令文本填进输入框。"""
+
+    stylePicked = pyqtSignal(str)
+    manageRequested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._buttons: dict[str, TogglePushButton] = {}
+        self._styles: list[dict[str, str]] = []
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(MutedLabel("风格", size=12))
+
+        self._flow_host = QWidget()
+        self._flow = FlowLayout(self._flow_host, needAni=False)
+        self._flow.setContentsMargins(0, 0, 0, 0)
+        self._flow.setHorizontalSpacing(8)
+        self._flow.setVerticalSpacing(6)
+        layout.addWidget(self._flow_host, 1)
+
+        self.manage_button = TransparentToolButton(FluentIcon.EDIT)
+        self.manage_button.setToolTip("管理风格预设（增删改）")
+        self.manage_button.setFixedSize(26, 26)
+        self.manage_button.clicked.connect(self.manageRequested.emit)
+        layout.addWidget(self.manage_button, 0, Qt.AlignmentFlag.AlignTop)
+
+    # ------------------------------------------------------------------ build
+    def set_styles(self, styles: list[dict[str, str]], active_id: str = "") -> None:
+        self._styles = list(styles)
+        while self._flow.count():
+            item = self._flow.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._buttons.clear()
+
+        for style in self._styles:
+            button = TogglePushButton(self._flow_host)
+            button.setText(style["name"])
+            button.setFixedHeight(28)
+            button.setToolTip(style["text"] or "不附加任何额外要求")
+            button.clicked.connect(lambda _=False, sid=style["id"]: self._pick(sid))
+            self._flow.addWidget(button)
+            self._buttons[style["id"]] = button
+        self.set_active(active_id)
+
+    def set_active(self, active_id: str) -> None:
+        """Highlight one chip without emitting anything."""
+        for style_id, button in self._buttons.items():
+            button.blockSignals(True)
+            button.setChecked(style_id == active_id)
+            button.blockSignals(False)
+
+    def _pick(self, style_id: str) -> None:
+        # TogglePushButton 可以点掉自己，但「当前风格」必须始终有值
+        self.set_active(style_id)
+        self.stylePicked.emit(style_id)
+
+
+class StyleManagerDialog(QDialog):
+    """增删改风格预设。内置预设也能改文本，但不会因此丢失 id。"""
+
+    def __init__(self, styles: list[dict[str, str]], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("风格预设")
+        self.setMinimumWidth(640)
+        self._rows: list[tuple[str, LineEdit, LineEdit]] = []
+
+        self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(20, 18, 20, 16)
+        self._outer.setSpacing(10)
+        self._outer.addWidget(ThemedLabel("风格预设", size=14, bold=True))
+        self._outer.addWidget(
+            MutedLabel("点击芯片会把这里的文本填进「可选指令」，你可以按需再改。", size=12)
+        )
+
+        self._rows_layout = QVBoxLayout()
+        self._rows_layout.setSpacing(8)
+        self._outer.addLayout(self._rows_layout)
+        for style in styles:
+            self._add_row(style["id"], style["name"], style["text"])
+
+        tools = QHBoxLayout()
+        tools.setSpacing(10)
+        self.add_button = PushButton("添加")
+        self.reset_button = PushButton("恢复内置")
+        tools.addWidget(self.add_button)
+        tools.addWidget(self.reset_button)
+        tools.addStretch(1)
+        self._outer.addLayout(tools)
+
+        footer = QHBoxLayout()
+        footer.setSpacing(10)
+        self.cancel_button = PushButton("取消")
+        self.ok_button = PrimaryPushButton("保存")
+        self.ok_button.setMinimumWidth(96)
+        footer.addStretch(1)
+        footer.addWidget(self.cancel_button)
+        footer.addWidget(self.ok_button)
+        self._outer.addLayout(footer)
+
+        self.add_button.clicked.connect(lambda: self._add_row("", "", ""))
+        self.reset_button.clicked.connect(self._reset_builtin)
+        self.cancel_button.clicked.connect(self.reject)
+        self.ok_button.clicked.connect(self.accept)
+
+    def _add_row(self, style_id: str, name: str, text: str) -> None:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        name_edit = LineEdit()
+        name_edit.setFixedWidth(120)
+        name_edit.setPlaceholderText("名称")
+        name_edit.setText(name)
+        name_edit.setMaxLength(MAX_STYLE_NAME)
+
+        text_edit = LineEdit()
+        text_edit.setPlaceholderText("留空 = 不附加任何指令（默认直译）")
+        text_edit.setText(text)
+
+        remove = TransparentToolButton(FluentIcon.DELETE)
+        remove.setFixedSize(26, 26)
+        remove.setToolTip("删除这个风格")
+
+        layout.addWidget(name_edit)
+        layout.addWidget(text_edit, 1)
+        layout.addWidget(remove)
+        self._rows_layout.addWidget(row)
+        entry = (style_id, name_edit, text_edit)
+        self._rows.append(entry)
+        remove.clicked.connect(lambda _=False, r=row, e=entry: self._remove_row(r, e))
+
+    def _remove_row(self, row: QWidget, entry) -> None:
+        if entry in self._rows:
+            self._rows.remove(entry)
+        row.setParent(None)
+        row.deleteLater()
+
+    def _reset_builtin(self) -> None:
+        for entry in list(self._rows):
+            pass
+        while self._rows_layout.count():
+            item = self._rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._rows.clear()
+        for style in default_styles():
+            self._add_row(style["id"], style["name"], style["text"])
+
+    def styles(self) -> list[dict[str, str]]:
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for style_id, name_edit, text_edit in self._rows:
+            name = name_edit.text().strip()
+            if not name:
+                continue
+            sid = style_id or new_style_id([{"id": s, "name": "", "text": ""} for s in seen])
+            if sid in seen:
+                sid = new_style_id([{"id": s, "name": "", "text": ""} for s in seen])
+            seen.add(sid)
+            result.append({"id": sid, "name": name[:MAX_STYLE_NAME], "text": text_edit.text().strip()})
+        return result or default_styles()
 
 
 class ImageDropArea(QWidget):
