@@ -51,13 +51,14 @@ class UpdateCheckWorker(QThread):
     checked = pyqtSignal(object)  # UpdateStatus
     failed = pyqtSignal(str)
 
-    def __init__(self, *, channel: str = "stable", parent: Any = None) -> None:
+    def __init__(self, *, channel: str = "stable", force: bool = True, parent: Any = None) -> None:
         super().__init__(parent)
         self._channel = channel or "stable"
+        self._force = force
 
     def run(self) -> None:  # noqa: D102
         try:
-            status = Updater(channel=self._channel).check()
+            status = Updater(channel=self._channel).check(force=self._force)
         except UpdateError as exc:
             self.failed.emit(str(exc))
             return

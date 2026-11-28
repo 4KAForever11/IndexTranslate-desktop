@@ -393,6 +393,11 @@ class SettingsPage(PageWidget):
         self.update_version_label = MutedLabel(VERSION, size=12)
         info.addWidget(self.update_version_label)
         info.addStretch(1)
+        self.update_page_button = PushButton("打开发布页")
+        self.update_page_button.setFixedHeight(34)
+        self.update_page_button.setToolTip("手动下载：GitHub 接口限流时也能自己拿包")
+        self.update_page_button.clicked.connect(self._open_releases_page)
+        info.addWidget(self.update_page_button)
         self.update_check_button = PushButton("检查更新")
         self.update_check_button.setFixedHeight(34)
         self.update_check_button.clicked.connect(self._check_update)
@@ -1020,7 +1025,7 @@ class SettingsPage(PageWidget):
             parent=self,
         )
 
-    def _check_update(self) -> None:
+    def _check_update(self, force: bool = True) -> None:
         from ..ui.update_worker import UpdateCheckWorker  # 延迟导入：只有点按钮才需要
 
         if self._update_worker is not None and self._update_worker.isRunning():
@@ -1028,7 +1033,8 @@ class SettingsPage(PageWidget):
         self.update_state.setText("正在检查…")
         self.update_check_button.setEnabled(False)
         worker = UpdateCheckWorker(
-            channel=str(settings.get("update_channel", "stable") or "stable")
+            channel=str(settings.get("update_channel", "stable") or "stable"),
+            force=force,
         )
         worker.checked.connect(self._on_update_checked)
         worker.failed.connect(self._on_update_failed)
@@ -1058,7 +1064,7 @@ class SettingsPage(PageWidget):
         self._toast(InfoBar.success, "已是最新", status.message)
 
     def _on_update_failed(self, message: str) -> None:
-        self.update_state.setText(message)
+        self.update_state.setText(message + "（可点「打开发布页」手动下载）")
         self._toast(InfoBar.error, "检查更新失败", message)
 
     def _offer_update(self, release) -> None:
@@ -1202,7 +1208,8 @@ class SettingsPage(PageWidget):
             return
         if not getattr(sys, "frozen", False):
             return
-        self._check_update()
+        # 启动时不强制刷新：15 分钟内查过就直接用缓存，免得每次都去撞 GitHub 的限流
+        self._check_update(force=False)
 
     def _on_port_changed(self, value: int) -> None:
         self._save("proxy_port", int(value))

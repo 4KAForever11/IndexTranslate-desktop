@@ -16,7 +16,7 @@ from typing import Any
 APP_NAME = "IndexTranslate desktop"
 APP_PROJECT = "IndexTranslate-desktop"
 APP_SLUG = "IndexTranslate"
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 
 API_BASE = "https://index-translate.bilibili.com/v1"
 SERVICE_HOME = "https://index-translate.bilibili.com/site/home.html"

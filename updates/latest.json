@@ -1,0 +1,22 @@
+{
+  "app": "IndexTranslate-desktop",
+  "version": "2.2.2",
+  "tag": "v2.2.2",
+  "name": "v2.2.2",
+  "page_url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/tag/v2.2.2",
+  "notes": "## 2.2.2 修掉「更新检查被限流（HTTP 403）」\n\n### 问题\n`api.github.com` 对**未登录**请求按出口 IP 限流，每小时只有 60 次。国内运营商、校园网、公司网络常常是成百上千人共用一个出口，额度几分钟就被别人用光，于是你点「检查更新」只看到：\n\n> 更新检查被限流（HTTP 403），稍后再试。\n\n这不是网络问题，重试也基本没用 —— 换台机器、换个时段才可能好。旧版本还把 403 当成普通失败，弹一句就结束了。\n\n### 现在的做法\n检查更新改成三层，任何一层拿到结果都算成功：\n\n1. **本地缓存**：15 分钟内查过就直接复用（启动时的自动检查走这条，平时根本不去撞限流）；\n2. **GitHub 官方接口**：正常情况仍然读 Releases，能拿到发布说明；\n3. **仓库里的静态清单**：读不到接口（限流 / 断网 / 被墙）时自动改读 `updates/latest.json`\n   （先 jsDelivr CDN，再 raw），里面有版本号、包名、体积、SHA-256 和下载地址 —— 照样能下载、校验、自动重启。\n\n界面上的变化：\n- 「软件更新」卡片新增 **打开发布页** 按钮，限流时也能自己拿包（不需要 API）；\n- 限流的提示改成能看懂的说明：*GitHub 接口限流（HTTP 403）：未登录请求按出口 IP 每小时只给 60 次，共享网络的出口很容易用光。可以稍后再试，或点「打开发布页」手动下载。*\n- 镜像生效时状态栏会注明「（GitHub 接口不可用，已改用镜像清单）」，不假装是官方接口。\n\n### 其它\n- 检查更新的 403/429 统一识别，不再把限流混进「HTTP 403」通用错误；\n- 清单缺失或版本对不上时行为与以前一致（报错 + 给发布页入口），不会假装「已是最新」。\n\n### 安装\n| 包 | 适用 |\n| --- | --- |\n| `IndexTranslate-desktop-2.2.2-win64.zip` | **推荐**（解压即用，启动快，不会踩临时目录问题） |\n| `IndexTranslate-desktop-2.2.2-win64-onefile.exe` | 单个文件，适合放 U 盘 |\n\n覆盖解压到旧目录即可，`%LOCALAPPDATA%\\IndexTranslate` 里的历史、术语、设置都保留。",
+  "assets": [
+    {
+      "name": "IndexTranslate-desktop-2.2.2-win64.zip",
+      "size": 62635826,
+      "sha256": "d0cfb7dd54de3c3f70bff1b4f73579d3bf6da5bc290d0bd1f32bbff4e871fd9e",
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.2/IndexTranslate-desktop-2.2.2-win64.zip"
+    },
+    {
+      "name": "IndexTranslate-desktop-2.2.2-win64-onefile.exe",
+      "size": 62540492,
+      "sha256": "2179df801d96a045fe11819ea074651c1a8f69f4c64e4a3fbde4fb5b6a3510fe",
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.2/IndexTranslate-desktop-2.2.2-win64-onefile.exe"
+    }
+  ]
+}

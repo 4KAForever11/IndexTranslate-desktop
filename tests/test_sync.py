@@ -399,7 +399,7 @@ class UpdaterTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
 
         client = Updater(api_base=f"http://127.0.0.1:{server.server_port}", current_version="1.2.0")
-        status = client.check()
+        status = client.check(use_cache=False)
         self.assertTrue(status.ok, status.message)
         self.assertTrue(status.available)
         self.assertEqual(status.release.version, "9.9.9")
@@ -417,7 +417,7 @@ class UpdaterTests(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         client = Updater(api_base=f"http://127.0.0.1:{server.server_port}", current_version="1.2.0")
-        status = client.check()
+        status = client.check(use_cache=False)
         self.assertTrue(status.ok)
         self.assertFalse(status.available)
         self.assertIn("最新", status.message)
