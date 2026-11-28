@@ -39,6 +39,7 @@ from ..core.extensions.catalog import (
 from ..core.extensions.manager import ExtensionError, download_extension
 from ..core.extensions.runtime import DEFAULT_IDLE_SEC, ExtensionRuntime
 from ..core.extensions.sidecar_client import SidecarError
+from ..core.languages import source_languages, target_languages
 from .theme import Card, MutedLabel, PageWidget, StatusDot, TextLabel, colors
 
 SUGGESTED = (
@@ -237,6 +238,36 @@ class AsrSetupCard(Card):
         device_row.addWidget(self._test_button)
         layout.addLayout(device_row)
 
+        # 实时字幕有自己的语言：看英文视频、界面用中文时，这两个值本来就不该一样
+        lang_row = QHBoxLayout()
+        lang_row.setSpacing(10)
+        lang_row.addWidget(MutedLabel("音频语言", size=12))
+        self._source_combo = ComboBox()
+        self._source_combo.setMinimumWidth(170)
+        self._source_combo.addItem("跟随主界面", userData="")
+        for code, label in source_languages():
+            if code == "auto":
+                continue
+            self._source_combo.addItem(label, userData=code)
+        self._source_combo.currentIndexChanged.connect(self._on_language_changed)
+        lang_row.addWidget(self._source_combo)
+        lang_row.addWidget(MutedLabel("译成", size=12))
+        self._target_combo = ComboBox()
+        self._target_combo.setMinimumWidth(170)
+        self._target_combo.addItem("跟随主界面", userData="")
+        for code, label in target_languages():
+            self._target_combo.addItem(label, userData=code)
+        self._target_combo.currentIndexChanged.connect(self._on_language_changed)
+        lang_row.addWidget(self._target_combo)
+        lang_row.addStretch(1)
+        layout.addLayout(lang_row)
+        lang_hint = MutedLabel(
+            "识别按「音频语言」走（不知道就留空，模型自己判断）；字幕里的译文按「译成」翻。",
+            size=11,
+        )
+        lang_hint.setWordWrap(True)
+        layout.addWidget(lang_hint)
+
         self._probe_label = MutedLabel(
             "先确认视频的声音是从哪条输出设备播放的：选错设备会一直抓不到声音。",
             size=11,
@@ -245,6 +276,7 @@ class AsrSetupCard(Card):
         layout.addWidget(self._probe_label)
 
         self._sync_state()
+        self._sync_languages()
         QTimer.singleShot(0, self._load_devices)
 
     # ------------------------------------------------------------------ 模型
@@ -409,6 +441,29 @@ class AsrSetupCard(Card):
     def _on_device_changed(self) -> None:
         value = str(self._device_combo.currentData() or "")
         settings.set("live_asr_device", value)
+        settings.save()
+
+    # ------------------------------------------------------------------ 语言
+    def _sync_languages(self) -> None:
+        pairs = (
+            (self._source_combo, str(settings.get("live_asr_source_lang") or "")),
+            (self._target_combo, str(settings.get("live_asr_target_lang") or "")),
+        )
+        for combo, saved in pairs:
+            combo.blockSignals(True)
+            index = 0
+            for i in range(combo.count()):
+                if str(combo.itemData(i) or "") == saved:
+                    index = i
+                    break
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+
+    def _on_language_changed(self) -> None:
+        if self._closing:
+            return
+        settings.set("live_asr_source_lang", str(self._source_combo.currentData() or ""))
+        settings.set("live_asr_target_lang", str(self._target_combo.currentData() or ""))
         settings.save()
 
     def _on_test(self) -> None:

@@ -1,10 +1,10 @@
 {
   "id": "ext-live-asr",
   "name": "系统音频实时字幕",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "entry": "main.py",
   "host_min": "2.0.0",
-  "description": "WASAPI 回环抓取系统播放的音频，回调式采集不会因设备静音卡死，VAD 断句后用 sherpa-onnx 离线识别，流式吐出双语字幕。",
+  "description": "WASAPI 回环抓取系统播放的音频，回调式采集不会因设备静音卡死，VAD 断句后用 sherpa-onnx 离线识别；连续讲话时按 6 秒强制切句，流式吐出双语字幕。",
   "methods": [
     "ping",
     "devices",

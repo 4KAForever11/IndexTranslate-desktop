@@ -1,22 +1,22 @@
 {
   "app": "IndexTranslate-desktop",
-  "version": "2.2.2",
-  "tag": "v2.2.2",
-  "name": "v2.2.2",
-  "page_url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/tag/v2.2.2",
-  "notes": "## 2.2.2 修掉「更新检查被限流（HTTP 403）」\n\n### 问题\n`api.github.com` 对**未登录**请求按出口 IP 限流，每小时只有 60 次。国内运营商、校园网、公司网络常常是成百上千人共用一个出口，额度几分钟就被别人用光，于是你点「检查更新」只看到：\n\n> 更新检查被限流（HTTP 403），稍后再试。\n\n这不是网络问题，重试也基本没用 —— 换台机器、换个时段才可能好。旧版本还把 403 当成普通失败，弹一句就结束了。\n\n### 现在的做法\n检查更新改成三层，任何一层拿到结果都算成功：\n\n1. **本地缓存**：15 分钟内查过就直接复用（启动时的自动检查走这条，平时根本不去撞限流）；\n2. **GitHub 官方接口**：正常情况仍然读 Releases，能拿到发布说明；\n3. **仓库里的静态清单**：读不到接口（限流 / 断网 / 被墙）时自动改读 `updates/latest.json`\n   （先 jsDelivr CDN，再 raw），里面有版本号、包名、体积、SHA-256 和下载地址 —— 照样能下载、校验、自动重启。\n\n界面上的变化：\n- 「软件更新」卡片新增 **打开发布页** 按钮，限流时也能自己拿包（不需要 API）；\n- 限流的提示改成能看懂的说明：*GitHub 接口限流（HTTP 403）：未登录请求按出口 IP 每小时只给 60 次，共享网络的出口很容易用光。可以稍后再试，或点「打开发布页」手动下载。*\n- 镜像生效时状态栏会注明「（GitHub 接口不可用，已改用镜像清单）」，不假装是官方接口。\n\n### 其它\n- 检查更新的 403/429 统一识别，不再把限流混进「HTTP 403」通用错误；\n- 清单缺失或版本对不上时行为与以前一致（报错 + 给发布页入口），不会假装「已是最新」。\n\n### 安装\n| 包 | 适用 |\n| --- | --- |\n| `IndexTranslate-desktop-2.2.2-win64.zip` | **推荐**（解压即用，启动快，不会踩临时目录问题） |\n| `IndexTranslate-desktop-2.2.2-win64-onefile.exe` | 单个文件，适合放 U 盘 |\n\n覆盖解压到旧目录即可，`%LOCALAPPDATA%\\IndexTranslate` 里的历史、术语、设置都保留。",
+  "version": "2.3.0",
+  "tag": "v2.3.0",
+  "name": "v2.3.0",
+  "page_url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/tag/v2.3.0",
+  "notes": "## 2.3.0 — 划词浮窗能拖了，输入框替换修好了，实时字幕终于出译文\n\n这一版全部来自实机反馈，修的都是「按钮按了没反应」这类看不见的失败。\n\n### 划词浮窗\n\n- **可以拖着走了**：按住卡片空白处（标题栏、正文边距都行）拖动即可，双击标题回到光标位置；正文里的文字仍然可以选中复制。\n- **长文本不再跑到屏幕外面**：窗口高度按屏幕剩余空间封顶，多出来的部分在框内滚动，底部「复制 / 转到主窗口」永远可见。原来窗口只长个、不收边，译文一长下半截和按钮就落到屏幕外了。\n- 顺手修了个高度少算一帧的老问题：先量高度再填文字，导致长文本总是比窗口慢一步。\n\n### 输入框替换（`Ctrl+Alt+R`）\n\n- **修好了「按了没反应」**：粘贴之后主线程直接 `sleep`，本进程的输入框收不到排队的 `Ctrl+V`，所以看起来什么都没发生。现在粘贴后继续跑事件循环。\n- **不再粘错内容**：剪贴板等 0.45 秒、且确认里面还是我们写的那段文字才还原；浏览器这类异步读剪贴板的程序不会再把**你原来的剪贴板**粘进去。\n- **不往别人的窗口里写字**：翻译期间如果前台窗口换了，直接放弃这次粘贴并在托盘提示。\n\n### 实时字幕（扩展 `ext-live-asr` → 1.2.2）\n\n- **识别出音频却没有译文**：原来只有扩展吐 `final` 才翻译，而 `final` 要等 0.55 秒静音——连续讲话或背景有音乐时可能几分钟都不出 `final`。现在：\n  - 扩展**每 6 秒强制切句**，长段也能持续出字幕；\n  - 宿主在你说完停手 700 ms 后**先用最新 `partial` 翻一版**，`final` 到了再覆盖；\n  - 上一句还没翻完时，新句子**排队补上**，不再被直接丢掉。\n- **语言可以单独设置**：扩展中心的「实时字幕设置」新增 **音频语言 / 译成** 两个下拉。看英文视频、界面用中文时，识别按「音频语言」走，译文按「译成」翻，互不影响；留空则跟随主界面。\n- 状态栏现在会显示语言配对（如「自动 → 中文」），一眼能看出有没有搞反。\n\n### 升级说明\n\n- 本次同时更新**主程序**（2.3.0）和**实时字幕扩展**（1.2.2）。扩展直接在「扩展中心 → 在线目录」点「更新到 v1.2.2」，或点「全部更新」。\n- 主程序内置检查更新：`设置 → 软件更新 → 检查更新`，会下载并按安装形态自动替换重启。\n\n### 校验\n\n- 单元测试 210 项全绿（新增浮窗贴边定位、字幕语言配对、`partial` 防抖状态机等 13 项）。\n- 浮窗实机验收 9/9：贴边显示、长文本限高+滚动、可拖动、拖出屏幕自动收回、双击复位。\n- 原地替换实机验收：注入 `Artificial intelligence is changing the way we work.` → 输入框变成 `人工智能正在改变我们的工作方式。`，剪贴板还原为原文。",
   "assets": [
     {
-      "name": "IndexTranslate-desktop-2.2.2-win64.zip",
-      "size": 62635826,
-      "sha256": "d0cfb7dd54de3c3f70bff1b4f73579d3bf6da5bc290d0bd1f32bbff4e871fd9e",
-      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.2/IndexTranslate-desktop-2.2.2-win64.zip"
+      "name": "IndexTranslate-desktop-2.3.0-win64.zip",
+      "size": 62640769,
+      "sha256": "c4faf68e2aac3cea5bf70189f087b875492cda2c6a353bbe80329921a67aabf6",
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.3.0/IndexTranslate-desktop-2.3.0-win64.zip"
     },
     {
-      "name": "IndexTranslate-desktop-2.2.2-win64-onefile.exe",
-      "size": 62540492,
-      "sha256": "2179df801d96a045fe11819ea074651c1a8f69f4c64e4a3fbde4fb5b6a3510fe",
-      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.2/IndexTranslate-desktop-2.2.2-win64-onefile.exe"
+      "name": "IndexTranslate-desktop-2.3.0-win64-onefile.exe",
+      "size": 62547666,
+      "sha256": "64c37644f4260ae5df0fd564a1a695e17ef6491c91dabf30bc1363cb3d2e3368",
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.3.0/IndexTranslate-desktop-2.3.0-win64-onefile.exe"
     }
   ]
 }

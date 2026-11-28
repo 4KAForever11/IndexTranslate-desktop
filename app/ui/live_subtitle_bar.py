@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from qfluentwidgets import FluentIcon, TransparentToolButton
 from ..core import asr_models, settings
 from ..core.extensions.runtime import ExtensionRuntime
 from ..core.extensions.sidecar_client import SidecarError
+from ..core.languages import display_name
 from ..core.models import ALL_GROUPS, EngineError, TranslateRequest
 from ..core.pipeline import get_pipeline
 from .theme import ACCENT
@@ -27,6 +29,10 @@ BAR_WIDTH = 900
 BAR_HEIGHT = 108
 MAX_LINES = 3
 CONTEXT_SENTENCES = 2
+# 连续语音里扩展可能很久不给 final（VAD 等不到静音），这时用 partial 顶上：
+# 停手 700 ms 之后的最新 partial 当作临时句子去翻，final 来了再覆盖。
+PARTIAL_DEBOUNCE_MS = 700
+PARTIAL_MIN_AGE_MS = 1200
 
 
 class SubtitleBar(QWidget):
@@ -217,6 +223,9 @@ class LiveSubtitleController(QObject):
     sentenceReady = pyqtSignal(str, str)
     statusChanged = pyqtSignal(str)
     failed = pyqtSignal(str)
+    # 扩展的回调在 sidecar 读线程里，所有计时器与翻译都要回到主线程再动
+    _wake = pyqtSignal()
+    _finalText = pyqtSignal(str)
 
     def __init__(self, runtime: ExtensionRuntime, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -228,7 +237,27 @@ class LiveSubtitleController(QObject):
         self._lock = threading.Lock()
         self._device_name = ""
         self._model = str(settings.get("replace_model") or "Index-Translate-2B")
+        self._last_translated = ""
+        self._pending_source = ""
+        self._partial_at = 0.0
+        # 部分结果防抖：既不能每 0.9 秒发一次请求把限流打满，也不能一直等 final
+        self._partial_timer = QTimer(self)
+        self._partial_timer.setSingleShot(True)
+        self._partial_timer.timeout.connect(self._flush_pending)
+        self._partial_timer.setInterval(PARTIAL_DEBOUNCE_MS)
+        self._wake.connect(self._on_wake)
+        self._finalText.connect(self._translate)
         self.sentenceReady.connect(self._on_sentence_ready)
+
+    # ---------------------------------------------------------------- 语言
+    def source_language(self) -> str:
+        """识别与翻译用的源语言：扩展自己的设置优先，回落到主设置。"""
+        value = str(settings.get("live_asr_source_lang") or "").strip()
+        return value or str(settings.get("source_lang") or "auto")
+
+    def target_language(self) -> str:
+        value = str(settings.get("live_asr_target_lang") or "").strip()
+        return value or str(settings.get("target_lang") or "zh")
 
     # ---------------------------------------------------------------- 状态
     @property
@@ -262,7 +291,7 @@ class LiveSubtitleController(QObject):
         params = {
             "model": model_dir,
             # 送给识别器的是「源语言」，不是目标语言；auto 用空串让模型自己判
-            "language": _asr_language(str(settings.get("source_lang") or "auto")),
+            "language": _asr_language(self.source_language()),
             "threshold": 0.5,
             "silence_sec": 0.55,
             "min_speech_sec": 0.35,
@@ -279,7 +308,11 @@ class LiveSubtitleController(QObject):
         self._client = client
         self._cancel.clear()
         self._device_name = ""
-        self.statusChanged.emit("正在监听系统音频…")
+        self._last_translated = ""
+        self._pending_source = ""
+        self.statusChanged.emit(
+            f"正在监听系统音频…（{_lang_pair(self.source_language(), self.target_language())}）"
+        )
         return True
 
     def _resolve_model(self) -> str:
@@ -318,10 +351,17 @@ class LiveSubtitleController(QObject):
         if event == "final":
             text = str(data.get("text") or "").strip()
             if text:
-                self._translate(text)
+                # final 来了就以它为准，丢掉还没翻的临时句子
+                self._partial_timer.stop()
+                self._pending_source = ""
+                self._finalText.emit(text)
         elif event == "partial":
             text = str(data.get("text") or "").strip()
             if text:
+                # 连续讲话时扩展可能长时间不出 final：先拿最新 partial 顶上
+                self._pending_source = text
+                self._partial_at = time.monotonic()
+                self._wake.emit()
                 self.statusChanged.emit(f"识别中… {text[:40]}")
         elif event == "ready":
             # 扩展真正把回环流打开之后才报 ready：在这之前说「监听中」是假的
@@ -349,11 +389,43 @@ class LiveSubtitleController(QObject):
         elif event == "error":
             self.failed.emit(str(data.get("message") or "识别扩展报错。"))
 
-    def _translate(self, text: str) -> None:
+    def _on_wake(self) -> None:
+        """自动防抖：每条新 partial 都把计时器往后推一点。"""
+        if self._client is None or self._cancel.is_set():
+            return
+        if not self._busy:
+            self._partial_timer.start()
+
+    def _flush_pending(self) -> None:
+        """把攒下来的最新 partial 送去翻译（防抖后的出口）。"""
+        if self._client is None or self._cancel.is_set():
+            return
+        text = self._pending_source.strip()
+        if not text:
+            return
         if self._busy:
-            # 上一句还在翻：直接跳过，字幕宁可漏一句，也不要堆积延迟
+            # 上一句还没回来：留着，等它结束再翻最新的一句
+            self._partial_timer.start()
+            return
+        age_ms = (time.monotonic() - self._partial_at) * 1000.0
+        if age_ms < PARTIAL_MIN_AGE_MS:
+            self._partial_timer.start(int(PARTIAL_MIN_AGE_MS - age_ms) + 50)
+            return
+        self._pending_source = ""
+        self._translate(text)
+
+    def _translate(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if self._busy:
+            # 上一句还在翻：记下最新的，翻完再补，别把话直接扔掉
+            self._pending_source = text
+            return
+        if text == self._last_translated:
             return
         self._busy = True
+        self._last_translated = text
         context = "".join(self._history)
         instruction = (
             f"这些是视频里连续出现的台词，上一句是「{context}」，请保持人称与语气一致。"
@@ -362,8 +434,8 @@ class LiveSubtitleController(QObject):
         )
         request = TranslateRequest(
             text=text,
-            source_lang=str(settings.get("source_lang") or "auto"),
-            target_lang=str(settings.get("target_lang") or "zh"),
+            source_lang=self.source_language(),
+            target_lang=self.target_language(),
             instruction=instruction,
             model=self._model,
             glossary_group=ALL_GROUPS if settings.get("use_glossary", True) else None,
@@ -391,6 +463,9 @@ class LiveSubtitleController(QObject):
             if translated:
                 self._history.append(text)
                 self.sentenceReady.emit(text, translated)
+            if self._pending_source:
+                # 这一句翻完的期间又攒了新句子：回到主线程接着翻
+                self._wake.emit()
 
         threading.Thread(target=worker, name="live-subtitle-translate", daemon=True).start()
 
@@ -414,6 +489,12 @@ def _asr_language(source_lang: str) -> str:
     if not source_lang or source_lang in ("auto", "自动检测"):
         return ""
     return source_lang.split("_")[0]
+
+
+def _lang_pair(source_lang: str, target_lang: str) -> str:
+    """状态栏里的「源 → 目标」，让人一眼确认语言配对没搞反。"""
+    left = "自动" if not source_lang or source_lang in ("auto", "自动检测") else display_name(source_lang)
+    return f"{left} → {display_name(target_lang)}"
 
 
 def _friendly(exc: Exception) -> str:

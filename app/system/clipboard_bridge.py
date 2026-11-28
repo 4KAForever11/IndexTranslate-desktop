@@ -95,6 +95,24 @@ def _flush_clipboard() -> None:
         app.processEvents()
 
 
+def _pump(seconds: float) -> None:
+    """在等待期间持续跑事件循环。
+
+    目标程序如果是**本进程**里的控件（测试、嵌入式编辑框），``WM_PASTE`` 会排在我们
+    自己的消息队列里；只要主线程 ``sleep``，这条消息就一直不被处理，粘贴看起来
+    「没反应」。所以等待一律用「processEvents + 短睡」的循环，而不是 ``time.sleep``。
+    """
+    app = QGuiApplication.instance()
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        if app is not None and not app.closingDown():
+            app.processEvents()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.015, remaining))
+
+
 def clipboard_text() -> str:
     """当前剪贴板里的纯文本（监听模式用，不做任何模拟）。"""
     try:
@@ -240,8 +258,19 @@ def capture_for_replace(timeout_sec: float = 0.28) -> str:
             pass
 
 
-def replace_selection_with_text(text: str, *, restore_delay: float = 0.12, restore: bool = True) -> bool:
-    """把译文写进剪贴板并模拟 Ctrl+V，覆盖目标程序里当前选区。"""
+def replace_selection_with_text(
+    text: str, *, restore_delay: float = 0.45, restore: bool = True
+) -> bool:
+    """把译文写进剪贴板并模拟 Ctrl+V，覆盖目标程序里当前选区。
+
+    两个细节决定这条路径能不能用：
+
+    * 粘贴之后**必须继续跑事件循环**：目标如果是本进程里的控件，``WM_PASTE``
+      排在自己的队列里，主线程一 ``sleep`` 就永远不处理（看起来「没反应」）。
+    * **恢复剪贴板要晚一点、且只在剪贴板还是我们写的内容时恢复**：浏览器、
+      Electron 程序读剪贴板是异步的，0.12 秒就还原会把用户原来的内容粘进去；
+      而如果这期间用户自己复制了别的东西，就不该再覆盖回去。
+    """
     if not text:
         return False
     clipboard = QGuiApplication.clipboard()
@@ -251,21 +280,31 @@ def replace_selection_with_text(text: str, *, restore_delay: float = 0.12, resto
         if not _write_text(text):
             return False
         send_chord(VK_V)
-        # 给目标程序留出读取剪贴板的时间，再还原用户原本的内容。
-        time.sleep(max(0.05, restore_delay))
+        _pump(max(0.1, restore_delay))
         return True
     except Exception:
         return False
     finally:
         if backup is not None:
             try:
-                backup.restore()
-                _flush_clipboard()
+                if (clipboard.text() or "") == text:
+                    backup.restore()
+                    _flush_clipboard()
             except Exception:
                 pass
 
 
 # ----------------------------------------------------------------- 前台进程
+def foreground_hwnd() -> int:
+    """当前前台窗口句柄（用来确认「粘贴目标」没在翻译期间被换掉）。"""
+    if _user32 is None:
+        return 0
+    try:
+        return int(_user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
 def foreground_process_name() -> str:
     """当前前台窗口所属进程的可执行文件名（小写，含 .exe）。"""
     if _user32 is None or _kernel32 is None:

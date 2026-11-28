@@ -16,7 +16,7 @@ from typing import Any
 APP_NAME = "IndexTranslate desktop"
 APP_PROJECT = "IndexTranslate-desktop"
 APP_SLUG = "IndexTranslate"
-VERSION = "2.2.2"
+VERSION = "2.3.0"
 
 API_BASE = "https://index-translate.bilibili.com/v1"
 SERVICE_HOME = "https://index-translate.bilibili.com/site/home.html"
@@ -163,6 +163,9 @@ DEFAULTS: dict[str, Any] = {
     "ocr_overlay_font_scale": 1.0,  # 贴片字号缩放
     "live_asr_model": "",          # sherpa-onnx 模型目录
     "live_asr_device": "",         # 回环设备："" = 跟随系统默认输出，或设备索引字符串
+    # 实时字幕是独立场景：视频是英文、界面是中文时两边语言可以不一样
+    "live_asr_source_lang": "",    # "" = 跟随主界面的源语言
+    "live_asr_target_lang": "",    # "" = 跟随主界面的目标语言
     "live_subtitle_enabled": False,
     "live_subtitle_geometry": "",  # 悬浮字幕条位置
     # 多端同步（WebDAV）

@@ -32,7 +32,7 @@ from ..core.pipeline import configure_pipeline, get_pipeline
 from ..core.proxy_manager import ProxyManager
 from ..core.sync.webdav_sync import SyncService
 from ..system.clipboard_bridge import capture_for_replace, capture_selected_text, is_blocked
-from ..system.clipboard_bridge import replace_selection_with_text
+from ..system.clipboard_bridge import foreground_hwnd, replace_selection_with_text
 from ..system.hotkeys import HotkeyError, HotkeyManager
 from ..system.ocr_bridge import OCR_ID, OcrTask
 from ..system.single_instance import SingleInstance
@@ -461,6 +461,7 @@ class MainWindow(FluentWindow):
             return
         self._replacing = True
         try:
+            target = foreground_hwnd()
             if bool(settings.get("replace_select_all", True)):
                 text = capture_for_replace()
             else:
@@ -474,6 +475,12 @@ class MainWindow(FluentWindow):
             if not result.strip():
                 if self.tray is not None:
                     self.tray.notify("原地替换失败", "没有拿到译文，请检查网络或接口地址。")
+                return
+            # 译文回来时前台可能已经换了窗口：这时候粘贴会写进别人的输入框，
+            # 宁可放弃这一次，也不要往错误的地方写字。
+            if target and foreground_hwnd() not in (0, target):
+                if self.tray is not None:
+                    self.tray.notify("已取消替换", "翻译期间切换了窗口，为安全起见没有粘贴。")
                 return
             replace_selection_with_text(result)
             if self.tray is not None:

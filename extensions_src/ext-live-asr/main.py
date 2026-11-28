@@ -32,9 +32,11 @@ import time
 import traceback
 from typing import Any
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 TARGET_RATE = 16000
 FRAME = 1024
+# 一句话最长 6 秒：超过就强制切句，连续讲话也能持续出字幕
+MAX_SEGMENT_SEC = 6.0
 MODEL_FILES = ("model.int8.onnx", "model.onnx")
 log = sys.stderr
 
@@ -313,6 +315,9 @@ def _capture(params: dict[str, Any]) -> None:
     threshold = float(params.get("threshold") or 0.012)
     silence_sec = float(params.get("silence_sec") or 0.55)
     min_speech_sec = float(params.get("min_speech_sec") or 0.35)
+    # 一直讲话 / 背景有音乐时 VAD 等不到静音，永远不吐 final——那样宿主就只能干等。
+    # 到了上限就强制切句，长段照样能出译文。
+    max_segment_sec = float(params.get("max_segment_sec") or MAX_SEGMENT_SEC)
 
     if not os.path.isdir(model_dir):
         raise RuntimeError(
@@ -512,6 +517,15 @@ def _capture(params: dict[str, Any]) -> None:
                 text = _decode(buffer, recognizer)
                 if text:
                     _emit("partial", {"text": text})
+
+            if speaking and (now - started_at - segment_start) >= max_segment_sec:
+                # 到了单句上限：先交这一句，再接着听下一句
+                _finish(buffer, recognizer, segment_start, now - started_at)
+                buffer.clear()
+                speaking = False
+                speech_frames = 0
+                silence_frames = 0
+                continue
 
         if buffer and speaking:
             _finish(buffer, recognizer, segment_start, time.monotonic() - started_at)

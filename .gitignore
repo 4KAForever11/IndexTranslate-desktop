@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -51,3 +51,8 @@ _*out/
 _*.err
 _models_test/
 _*.txt
+# 一次性脚本/截图/自检用的临时数据目录
+_st*/
+_asrshot/
+_popout/
+_rel*.md

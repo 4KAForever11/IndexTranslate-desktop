@@ -35,6 +35,16 @@ MIN_OUTPUT_HEIGHT = 44
 POPUP_WIDTH = 460
 CURSOR_OFFSET = 14
 
+
+def clamp_into(area, width: int, height: int, x: int, y: int) -> tuple[int, int]:
+    """把 (x, y) 收进 area：浮窗可以贴着边缘，但绝不露到屏幕外面。"""
+    max_x = area.right() - width + 1
+    max_y = area.bottom() - height + 1
+    return (
+        int(max(area.left(), min(x, max_x))),
+        int(max(area.top(), min(y, max_y))),
+    )
+
 _BROWSER_QSS = """
 QTextBrowser {
     background: transparent;
@@ -91,6 +101,8 @@ class TranslatePopup(QWidget):
         self._source_text = ""
         self._notice = ""
         self._pinned = bool(settings.get("popup_pinned", False))
+        self._drag_offset: QPoint | None = None
+        self._dragged = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFixedWidth(POPUP_WIDTH + 24)
         self._build_ui()
@@ -122,6 +134,13 @@ class TranslatePopup(QWidget):
         header.addWidget(self._lang_label)
         header.addStretch(1)
         header.addWidget(self._model_label)
+
+        # 标题栏可以拖着走：浮窗挡到正文时不用先关掉再重新划词。
+        # 拖动手势由本窗口自己处理——卡片与标签都不吃鼠标事件，会冒泡上来；
+        # 翻译区（QTextBrowser）例外，那里要留给用户选中文字。
+        for handle in (self._surface, self._title, self._lang_label, self._model_label):
+            handle.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._title.setToolTip("拖动这里可以移动浮窗；双击回到光标位置")
 
         self.pin_button = TransparentToolButton(FluentIcon.PIN)
         self.pin_button.setFixedSize(24, 24)
@@ -308,24 +327,24 @@ class TranslatePopup(QWidget):
         return self._notice or base
 
     def _render(self, text: str) -> None:
+        bar = self.output.verticalScrollBar()
+        at_bottom = bar.value() >= (bar.maximum() - 4)
         self._fit_output(text)
-        at_bottom = self.output.verticalScrollBar().value() >= (
-            self.output.verticalScrollBar().maximum() - 4
-        )
-        self.output.setPlainText(text)
         if at_bottom:
-            bar = self.output.verticalScrollBar()
             bar.setValue(bar.maximum())
 
-    def _fit_output(self, text: str) -> None:
-        """按内容行数自适应高度，超过上限就滚动。"""
+    def _fit_output(self, text: str | None = None) -> None:
+        """按内容行数自适应高度，超过上限就滚动；始终保证整窗留在屏幕内。"""
+        if text is not None:
+            self.output.setPlainText(text)
         self.output.setFixedHeight(MIN_OUTPUT_HEIGHT)
         document = self.output.document()
         document.setTextWidth(self.output.viewport().width() or (POPUP_WIDTH - 40))
         needed = int(document.size().height()) + 10
-        height = max(MIN_OUTPUT_HEIGHT, min(MAX_OUTPUT_HEIGHT, needed))
+        height = max(MIN_OUTPUT_HEIGHT, min(self._max_output_height(), needed))
         self.output.setFixedHeight(height)
         self.adjustSize()
+        self._clamp_into_screen()
 
     def _on_done(self, text: str, elapsed_ms: int) -> None:
         self._render(text)
@@ -383,8 +402,41 @@ class TranslatePopup(QWidget):
         self.hide()
 
     # ------------------------------------------------------------------ layout
+    def _screen_area(self):
+        screen = (
+            QGuiApplication.screenAt(self.frameGeometry().center())
+            or QGuiApplication.screenAt(QCursor.pos())
+            or QGuiApplication.primaryScreen()
+        )
+        return screen.availableGeometry() if screen is not None else None
+
+    def _max_output_height(self) -> int:
+        """译文区的上限：不超过 MAX_OUTPUT_HEIGHT，也不超过当前屏幕剩下的高度。"""
+        area = self._screen_area()
+        if area is None:
+            return MAX_OUTPUT_HEIGHT
+        chrome = max(60, self.height() - self.output.height())
+        return max(MIN_OUTPUT_HEIGHT, min(MAX_OUTPUT_HEIGHT, area.height() - chrome - 28))
+
+    def _clamp_into_screen(self) -> None:
+        area = self._screen_area()
+        if area is None:
+            return
+        # adjustSize() 之后几何信息要等一轮事件循环才更新，这里按 sizeHint
+        # 取两者较大的那个，否则译文一长就会按旧高度算、窗口下半截留在屏幕外。
+        hint = self.sizeHint()
+        width = max(self.width(), hint.width())
+        height = max(self.height(), hint.height())
+        x, y = clamp_into(area, width, height, self.x(), self.y())
+        if x != self.x() or y != self.y():
+            self.move(QPoint(int(x), int(y)))
+
     def _place_near_cursor(self) -> None:
         """出现在鼠标右下方；贴近屏幕边缘时翻到另一侧，绝不露到屏幕外。"""
+        if self._dragged:
+            # 用户把它拖到顺手的位置了，就别再拽回光标旁边。
+            self._clamp_into_screen()
+            return
         self.adjustSize()
         anchor = QCursor.pos()
         screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
@@ -401,6 +453,40 @@ class TranslatePopup(QWidget):
         x = max(area.left(), min(x, area.right() - width))
         y = max(area.top(), min(y, area.bottom() - height))
         self.move(QPoint(int(x), int(y)))
+
+    # ------------------------------------------------------------------ 拖动
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 用事件自带的全局坐标，而不是去轮询 QCursor：
+            # 高速拖动时光标可能已经跑在前面，轮询会让窗口「跟不上」。
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            self._dragged = True
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._drag_offset is not None:
+            self._drag_offset = None
+            self._clamp_into_screen()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragged = False
+            self._place_near_cursor()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     # ------------------------------------------------------------------ events
     def event(self, event) -> bool:  # noqa: N802
