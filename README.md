@@ -233,6 +233,10 @@ DLL / OpenMP 还会互相打架；更要命的是，推理库一旦段错误，�
   也可以点 **换地址** 换成自己的镜像（任何托管同格式 JSON 的地址都行，格式见 `extensions/catalog.json`）；
 - 目录里的 `host_min` 用来拦住旧版本主程序——新版扩展要求新版宿主，避免装上跑不起来。
 
+> **发版注意**：jsDelivr 会缓存 `@main` 上的 catalog（约 12 小时）。每次改完 `extensions/catalog.json`
+> 要顺手清一次缓存，否则走镜像的用户会看到上一版：
+> `https://purge.jsdelivr.net/gh/4KAForever11/IndexTranslate-desktop@main/extensions/catalog.json`
+
 <img src="doc/screenshots/settings-sync.png" alt="同步与更新" width="860">
 
 - **同步范围**：术语与分组、风格预设、12 项通用偏好。译文缓存和批量任务的绝对路径**不上云**，
