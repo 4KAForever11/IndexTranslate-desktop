@@ -8,16 +8,19 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
+    ComboBox,
     FluentIcon,
     InfoBar,
     InfoBarPosition,
     MessageBox,
     PrimaryPushButton,
+    ProgressBar,
     PushButton,
     SmoothScrollArea,
     SpinBox,
@@ -26,6 +29,7 @@ from qfluentwidgets import (
 )
 
 from ..core import settings
+from ..core import asr_models
 from ..core.extensions.catalog import (
     CatalogEntry,
     CatalogError,
@@ -111,6 +115,350 @@ class CatalogInstallWorker(QThread):
             except OSError:
                 pass
         self.done.emit(installed)
+
+
+class AsrModelWorker(QThread):
+    """后台下载语音识别模型（228 MB），带进度与取消。"""
+
+    progressed = pyqtSignal(int, int, str)
+    done = pyqtSignal(str)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, folder: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._folder = folder
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def run(self) -> None:  # noqa: D401 - QThread 入口
+        try:
+            path = asr_models.download(
+                folder=self._folder or None,
+                progress=lambda done, total, name: self.progressed.emit(done, total, name),
+                cancel=self._cancel,
+            )
+        except asr_models.AsrModelError as exc:
+            self.failed.emit(exc.message, exc.detail)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"下载模型失败：{exc}", str(exc))
+        else:
+            self.done.emit(str(path))
+
+
+class AsrProbeWorker(QThread):
+    """调用扩展的 devices / test 方法（会阻塞 3 秒左右）。"""
+
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, client, method: str, params: dict | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self._client = client
+        self._method = method
+        self._params = params or {}
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self._client.call(self._method, self._params, timeout=25.0))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+class AsrSetupCard(Card):
+    """实时字幕的「识别模型 + 声音来源」设置。
+
+    这两项以前只能手改 settings.json，等于功能打不开；现在都在这里点。
+    """
+
+    def __init__(self, runtime: ExtensionRuntime, page: "ExtensionsPage", parent=None) -> None:
+        super().__init__(parent, radius=10)
+        self._runtime = runtime
+        self._page = page
+        self._worker: AsrModelWorker | None = None
+        self._probe: AsrProbeWorker | None = None
+        self._closing = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 18)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        header.addWidget(TextLabel("实时字幕设置", size=14, bold=True))
+        header.addWidget(MutedLabel("识别模型与声音来源", size=12))
+        header.addStretch(1)
+        self._state = MutedLabel("", size=12)
+        header.addWidget(self._state)
+        layout.addLayout(header)
+
+        hint = MutedLabel(
+            f"{asr_models.MODEL_TITLE} · {asr_models.total_bytes() / 1048576:.0f} MB，"
+            "下载一次即可离线识别；中/英/日/韩/粤语共用一个模型。",
+            size=11,
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self._bar = ProgressBar()
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setVisible(False)
+        layout.addWidget(self._bar)
+
+        model_row = QHBoxLayout()
+        model_row.setSpacing(10)
+        self._download_button = PrimaryPushButton("下载模型")
+        self._download_button.clicked.connect(self._on_download)
+        model_row.addWidget(self._download_button)
+        self._locate_button = PushButton("选择本地模型目录")
+        self._locate_button.clicked.connect(self._on_locate)
+        model_row.addWidget(self._locate_button)
+        self._open_button = PushButton("打开模型目录")
+        self._open_button.clicked.connect(self._on_open_folder)
+        model_row.addWidget(self._open_button)
+        model_row.addStretch(1)
+        layout.addLayout(model_row)
+
+        device_row = QHBoxLayout()
+        device_row.setSpacing(10)
+        device_row.addWidget(MutedLabel("声音来源", size=12))
+        self._device_combo = ComboBox()
+        self._device_combo.setMinimumWidth(360)
+        self._device_combo.currentIndexChanged.connect(self._on_device_changed)
+        device_row.addWidget(self._device_combo, 1)
+        self._refresh_button = PushButton("刷新设备")
+        self._refresh_button.clicked.connect(self._load_devices)
+        device_row.addWidget(self._refresh_button)
+        self._test_button = PushButton("测试 3 秒")
+        self._test_button.clicked.connect(self._on_test)
+        self._test_button.setToolTip("录一段系统音频，报告有没有真的收到声音")
+        device_row.addWidget(self._test_button)
+        layout.addLayout(device_row)
+
+        self._probe_label = MutedLabel(
+            "先确认视频的声音是从哪条输出设备播放的：选错设备会一直抓不到声音。",
+            size=11,
+        )
+        self._probe_label.setWordWrap(True)
+        layout.addWidget(self._probe_label)
+
+        self._sync_state()
+        QTimer.singleShot(0, self._load_devices)
+
+    # ------------------------------------------------------------------ 模型
+    def _sync_state(self) -> None:
+        path = asr_models.configured_dir() or str(asr_models.target_dir())
+        text, ready = asr_models.describe(path)
+        self._state.setText(text if len(text) < 60 else "已就绪")
+        self._download_button.setText("重新下载" if ready else "下载模型")
+        self._state.setToolTip(text)
+
+    def _on_download(self) -> None:
+        if self._closing:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._download_button.setEnabled(False)
+        self._locate_button.setEnabled(False)
+        self._bar.setVisible(True)
+        self._bar.setValue(0)
+        self._state.setText("正在下载模型…")
+        worker = AsrModelWorker()
+        worker.progressed.connect(self._on_progress)
+        worker.done.connect(self._on_download_done)
+        worker.failed.connect(self._on_download_failed)
+        worker.finished.connect(self._on_download_finished)
+        self._worker = worker
+        worker.start()
+
+    def _on_progress(self, done: int, total: int, name: str) -> None:
+        percent = int(done * 100 / total) if total else 0
+        self._bar.setValue(min(percent, 100))
+        self._state.setText(
+            f"下载中 {done / 1048576:.0f}/{total / 1048576:.0f} MB · {name}"
+        )
+
+    def _on_download_done(self, path: str) -> None:
+        try:
+            asr_models.ensure_configured(Path(path))
+        except asr_models.AsrModelError as exc:
+            self._on_download_failed(exc.message, exc.detail)
+            return
+        InfoBar.success(
+            "识别模型已就绪",
+            "现在打开右上角托盘 →「实时字幕（系统音频）」即可。",
+            duration=4000,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            parent=self._page.window(),
+        )
+        self._sync_state()
+
+    def _on_download_failed(self, title: str, detail: str) -> None:
+        self._bar.setVisible(False)
+        self._state.setText("下载失败")
+        InfoBar.error(
+            title,
+            detail[:300],
+            duration=8000,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            parent=self._page.window(),
+        )
+
+    def _on_download_finished(self) -> None:
+        self._download_button.setEnabled(True)
+        self._locate_button.setEnabled(True)
+        if self._bar.value() >= 100:
+            self._bar.setVisible(False)
+        self._worker = None
+
+    def _on_locate(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "选择识别模型目录")
+        if not folder:
+            return
+        if not asr_models.is_ready(folder):
+            InfoBar.error(
+                "这个目录里没有可用模型",
+                "需要 model.int8.onnx（或 model.onnx）与 tokens.txt。",
+                duration=6000,
+                position=InfoBarPosition.BOTTOM_RIGHT,
+                parent=self._page.window(),
+            )
+            return
+        asr_models.ensure_configured(Path(folder))
+        self._sync_state()
+        InfoBar.success(
+            "已指定模型目录",
+            folder,
+            duration=3000,
+            position=InfoBarPosition.BOTTOM_RIGHT,
+            parent=self._page.window(),
+        )
+
+    def _on_open_folder(self) -> None:
+        folder = asr_models.target_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))  # noqa: S606 - Windows 打开资源管理器
+        except OSError as exc:
+            InfoBar.error(
+                "打不开目录",
+                str(exc),
+                duration=4000,
+                position=InfoBarPosition.BOTTOM_RIGHT,
+                parent=self._page.window(),
+            )
+
+    # ------------------------------------------------------------------ 设备
+    def _client(self):
+        client = self._runtime.client("ext-live-asr")
+        if client is None:
+            self._probe_label.setText("扩展未启用：先把上面的开关打开。")
+            return None
+        return client
+
+    def _load_devices(self) -> None:
+        if self._closing:
+            return
+        client = self._runtime.client("ext-live-asr")
+        if client is None:
+            return
+        if self._probe is not None and self._probe.isRunning():
+            return
+        probe = AsrProbeWorker(client, "devices")
+        probe.done.connect(self._on_devices)
+        probe.failed.connect(self._on_probe_failed)
+        probe.finished.connect(self._on_probe_finished)
+        self._probe = probe
+        probe.start()
+
+    def _on_probe_finished(self) -> None:
+        self._probe = None
+        self._test_button.setEnabled(True)
+
+    def _on_devices(self, result: object) -> None:
+        devices = []
+        if isinstance(result, dict):
+            devices = list(result.get("devices") or [])
+        self._device_combo.blockSignals(True)
+        self._device_combo.clear()
+        self._device_combo.addItem("自动（跟随系统默认输出）", userData="")
+        for info in devices:
+            label = str(info.get("name") or "")
+            if info.get("default"):
+                label += "  · 默认"
+            self._device_combo.addItem(label, userData=str(info.get("index")))
+        saved = str(settings.get("live_asr_device", "") or "")
+        index = 0
+        for i in range(self._device_combo.count()):
+            if str(self._device_combo.itemData(i)) == saved:
+                index = i
+                break
+        self._device_combo.setCurrentIndex(index)
+        self._device_combo.blockSignals(False)
+        if len(devices) <= 1:
+            self._probe_label.setText(
+                "系统里只找到一条回环设备；如果视频走的是蓝牙耳机，先在 Windows 里把它设为默认输出。"
+            )
+
+    def _on_device_changed(self) -> None:
+        value = str(self._device_combo.currentData() or "")
+        settings.set("live_asr_device", value)
+        settings.save()
+
+    def _on_test(self) -> None:
+        if self._closing:
+            return
+        client = self._client()
+        if client is None:
+            return
+        if self._probe is not None and self._probe.isRunning():
+            return
+        self._test_button.setEnabled(False)
+        self._probe_label.setText("正在录 3 秒系统音频…（请让视频继续播放）")
+        params = {"seconds": 3.0}
+        value = str(self._device_combo.currentData() or "")
+        if value:
+            params["device"] = int(value)
+        probe = AsrProbeWorker(client, "test", params)
+        probe.done.connect(self._on_test_done)
+        probe.failed.connect(self._on_probe_failed)
+        probe.finished.connect(self._on_probe_finished)
+        self._probe = probe
+        probe.start()
+
+    def _on_test_done(self, result: object) -> None:
+        if not isinstance(result, dict):
+            self._probe_label.setText("测试没有返回结果")
+            return
+        seconds = float(result.get("seconds") or 3.0)
+        peak = float(result.get("peak") or 0.0)
+        device = str(result.get("device") or "")
+        if result.get("silent"):
+            self._probe_label.setText(
+                f"「{device}」{seconds:.0f} 秒内几乎全是静音（峰值 {peak:.3f}）。"
+                "换一条设备再测，或确认视频正在出声。"
+            )
+        else:
+            self._probe_label.setText(
+                f"「{device}」收到声音：峰值 {peak:.3f}。这条设备可以用于实时字幕。"
+            )
+
+    def _on_probe_failed(self, message: str) -> None:
+        self._probe_label.setText(f"测试失败：{message[:160]}")
+
+    def shutdown(self) -> None:
+        """停掉后台线程；QThread 还在跑时被析构会直接 fail-fast 崩进程。"""
+        self._closing = True
+        for worker, cancel in ((self._worker, True), (self._probe, False)):
+            if worker is None or not worker.isRunning():
+                continue
+            if cancel and hasattr(worker, "cancel"):
+                worker.cancel()
+            worker.wait(4000)
+        self._worker = None
+        self._probe = None
 
 
 class ExtensionCard(Card):
@@ -333,13 +681,25 @@ class ExtensionsPage(PageWidget):
         rows = self._runtime.status()
         ids = [row["id"] for row in rows]
 
-        if keep_cards and ids == list(self._cards):
+        asr_row = next((row for row in rows if row["id"] == "ext-live-asr"), None)
+        want_asr = bool(asr_row and asr_row["enabled"] and asr_row["host_ok"])
+        has_asr = getattr(self, "_asr_card", None) is not None
+
+        if keep_cards and ids == list(self._cards) and want_asr == has_asr:
             for row in rows:
                 card = self._cards.get(row["id"])
                 if card is not None:
                     card.update_row(row)
             self._update_summary(rows)
             return
+
+        # 重建列表时把设置卡片摘下来复用，避免每次刷新都重新拉设备、丢掉下载进度；
+        # 也必须先停掉它里面的 QThread，运行中的 QThread 被析构会直接崩进程。
+        old_asr = getattr(self, "_asr_card", None)
+        self._asr_card = None
+        if old_asr is not None:
+            self._list.removeWidget(old_asr)
+            old_asr.setParent(None)
 
         for card in self._cards.values():
             self._list.removeWidget(card)
@@ -355,14 +715,26 @@ class ExtensionsPage(PageWidget):
         if not rows:
             self._list.addWidget(self._empty_block())
 
+        reused = False
         for row in rows:
             card = ExtensionCard(row, self._runtime, self)
             self._cards[row["id"]] = card
             self._list.addWidget(card)
+            if row["id"] == "ext-live-asr" and row["enabled"] and row["host_ok"]:
+                if old_asr is not None and not reused:
+                    self._asr_card = old_asr
+                    reused = True
+                else:
+                    self._asr_card = AsrSetupCard(self._runtime, self)
+                self._list.addWidget(self._asr_card)
 
         self._list.addWidget(self._suggest_block(rows))
         self._list.addStretch(1)
         self._update_summary(rows)
+        if old_asr is not None and not reused:
+            # 扩展被停用/卸载了：连同线程一起收掉
+            old_asr.shutdown()
+            old_asr.deleteLater()
 
     def _update_summary(self, rows: list[dict]) -> None:
         running = [row for row in rows if row["running"]]
@@ -641,4 +1013,7 @@ class ExtensionsPage(PageWidget):
         settings.save()
 
     def shutdown(self) -> None:
+        card = getattr(self, "_asr_card", None)
+        if card is not None:
+            card.shutdown()
         self._runtime.shutdown()

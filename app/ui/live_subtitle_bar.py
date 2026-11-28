@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from pathlib import Path
 
 from PyQt6.QtCore import QObject, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPainterPath
 from PyQt6.QtWidgets import QWidget
 from qfluentwidgets import FluentIcon, TransparentToolButton
 
-from ..core import settings
+from ..core import asr_models, settings
 from ..core.extensions.runtime import ExtensionRuntime
 from ..core.extensions.sidecar_client import SidecarError
 from ..core.models import ALL_GROUPS, EngineError, TranslateRequest
@@ -169,6 +170,7 @@ class LiveSubtitleController(QObject):
         self._cancel = threading.Event()
         self._busy = False
         self._lock = threading.Lock()
+        self._device_name = ""
         self._model = str(settings.get("replace_model") or "Index-Translate-2B")
         self.sentenceReady.connect(self._on_sentence_ready)
 
@@ -193,33 +195,50 @@ class LiveSubtitleController(QObject):
         client = self._client_or_none()
         if client is None:
             return False
-        model_dir = str(self._runtime.model_path(ASR_ID) or "")
+        model_dir = self._resolve_model()
         if not model_dir:
             self.failed.emit(
-                "还没有选择语音识别模型目录（扩展中心 → 实时字幕 → 选择模型目录）。"
+                "识别模型还没下载。请到「扩展中心 → 实时字幕设置」点「下载模型」"
+                f"（{asr_models.total_bytes() / 1048576:.0f} MB，下载一次即可离线使用）。"
             )
             return False
+        device = str(settings.get("live_asr_device", "") or "")
+        params = {
+            "model": model_dir,
+            # 送给识别器的是「源语言」，不是目标语言；auto 用空串让模型自己判
+            "language": _asr_language(str(settings.get("source_lang") or "auto")),
+            "threshold": 0.5,
+            "silence_sec": 0.55,
+            "min_speech_sec": 0.35,
+        }
+        if device:
+            params["device"] = int(device) if device.isdigit() else device
         try:
             client.add_subscriber(self._on_event)
-            client.call(
-                "start",
-                {
-                    "model": model_dir,
-                    "language": str(settings.get("target_lang") or "zh"),
-                    "threshold": 0.5,
-                    "silence_sec": 0.55,
-                    "min_speech_sec": 0.35,
-                },
-                timeout=30.0,
-            )
+            client.call("start", params, timeout=30.0)
         except Exception as exc:
             client.remove_subscriber(self._on_event)
             self.failed.emit(_friendly(exc))
             return False
         self._client = client
         self._cancel.clear()
+        self._device_name = ""
         self.statusChanged.emit("正在监听系统音频…")
         return True
+
+    def _resolve_model(self) -> str:
+        """优先用设置里记录的目录；没有就把已下载好的默认目录接上。"""
+        current = str(self._runtime.model_path(ASR_ID) or "")
+        if current and asr_models.is_ready(current):
+            return current
+        ready = asr_models.configured_dir()
+        if ready:
+            try:
+                asr_models.ensure_configured(Path(ready))
+            except asr_models.AsrModelError:
+                return ""
+            return ready
+        return ""
 
     def stop(self) -> None:
         client = self._client
@@ -248,6 +267,29 @@ class LiveSubtitleController(QObject):
             text = str(data.get("text") or "").strip()
             if text:
                 self.statusChanged.emit(f"识别中… {text[:40]}")
+        elif event == "ready":
+            # 扩展真正把回环流打开之后才报 ready：在这之前说「监听中」是假的
+            device = str(data.get("device") or "")
+            if device:
+                self._device_name = device
+            rate = int(data.get("rate") or 0)
+            suffix = f" · {rate // 1000} kHz" if rate else ""
+            self.statusChanged.emit(
+                f"监听中 · {self._device_name or '系统音频'}{suffix} · 等待声音…"
+            )
+        elif event == "level":
+            # 扩展每 0.5 秒报一次电平：抓不到声音时这里会一直是空的
+            rms = float(data.get("rms") or 0.0)
+            device = str(data.get("device") or "")
+            if device:
+                self._device_name = device
+            self.statusChanged.emit(
+                f"监听中 · {self._device_name or '系统音频'} · 电平 {_level_bar(rms)}"
+            )
+        elif event == "warning":
+            text = str(data.get("message") or "").strip()
+            if text:
+                self.statusChanged.emit(text)
         elif event == "error":
             self.failed.emit(str(data.get("message") or "识别扩展报错。"))
 
@@ -298,6 +340,24 @@ class LiveSubtitleController(QObject):
 
     def _on_sentence_ready(self, source: str, translated: str) -> None:
         self.statusChanged.emit("已翻译")
+
+
+def _level_bar(rms: float) -> str:
+    """把 RMS 音量画成 6 格电平条，方便一眼看出「根本没收到声音」。"""
+    level = max(0.0, min(1.0, rms * 12.0))
+    filled = int(round(level * 6))
+    return "▮" * filled + "▯" * (6 - filled)
+
+
+def _asr_language(source_lang: str) -> str:
+    """把宿主的语言代码转成 sherpa-onnx 认识的语言名。
+
+    ``auto`` 交给模型自己判断（SenseVoice 自带语种识别），
+    其余取主标签：``en`` / ``zh`` / ``ja`` / ``ko`` / ``yue``。
+    """
+    if not source_lang or source_lang in ("auto", "自动检测"):
+        return ""
+    return source_lang.split("_")[0]
 
 
 def _friendly(exc: Exception) -> str:

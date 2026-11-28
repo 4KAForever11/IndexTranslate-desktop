@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 1, 0, 0),
-    prodvers=(2, 1, 0, 0),
+    filevers=(2, 2, 0, 0),
+    prodvers=(2, 2, 0, 0),
     mask=0x3F,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           [
             StringStruct("CompanyName", "IndexTranslate-desktop"),
             StringStruct("FileDescription", "IndexTranslate desktop - 免费公网翻译客户端"),
-            StringStruct("FileVersion", "2.1.0"),
+            StringStruct("FileVersion", "2.2.0"),
             StringStruct("InternalName", "IndexTranslate-desktop"),
             StringStruct("LegalCopyright", "Prompt logic based on call_api.py"),
             StringStruct("OriginalFilename", "IndexTranslate-desktop.exe"),
             StringStruct("ProductName", "IndexTranslate desktop"),
-            StringStruct("ProductVersion", "2.1.0"),
+            StringStruct("ProductVersion", "2.2.0"),
           ],
         )
       ]

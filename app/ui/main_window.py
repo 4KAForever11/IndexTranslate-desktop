@@ -208,6 +208,8 @@ class MainWindow(FluentWindow):
     def show_extensions(self) -> None:
         self.show_from_tray()
         self.switchTo(self.extensions_page)
+        # 装完扩展、改过开关之后回到这一页应该看到最新状态，而不是上次的旧卡片
+        self.extensions_page.refresh(keep_cards=True)
 
     def open_official_page(self) -> None:
         """打开官方仓库：用户拿它核对下载来源，防改包伪冒。"""
@@ -243,11 +245,20 @@ class MainWindow(FluentWindow):
         self._sync_subtitle_action()
 
     def _on_subtitle_failed(self, message: str) -> None:
+        was_running = self.subtitle.running
         if self.tray is not None:
             self.tray.notify("实时字幕不可用", message[:200])
         self.subtitle.stop()
         self.subtitle_bar.hide()
         self._sync_subtitle_action()
+        if was_running:
+            # 已经跑起来之后的中途报错（比如网络抖动）不值得弹窗打断看片
+            return
+        box = MessageBox("实时字幕打不开", message[:600], self)
+        box.yesButton.setText("去扩展中心")
+        box.cancelButton.setText("知道了")
+        if box.exec():
+            self.show_extensions()
 
     @property
     def minimize_to_tray(self) -> bool:

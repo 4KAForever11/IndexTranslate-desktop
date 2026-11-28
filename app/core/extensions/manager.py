@@ -85,6 +85,19 @@ class InstalledExtension:
         )
 
 
+def _replace_with_retry(src: Path, dst: Path, *, attempts: int = 12, delay: float = 0.25) -> None:
+    """替换目录；子进程刚被杀掉时文件句柄要几百毫秒才释放，所以要重试。"""
+    last: Exception | None = None
+    for _ in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:  # 目录里有进程正在使用的 exe
+            last = exc
+            time.sleep(delay)
+    raise ExtensionError(f"扩展目录被占用，安装没完成（先停用该扩展再试）：{last}")
+
+
 class ExtensionManager:
     """管理 ``<data_dir>/extensions`` 下的扩展包。"""
 
@@ -93,6 +106,8 @@ class ExtensionManager:
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path = self.root / INDEX_NAME
         self._index: dict[str, dict[str, Any]] = self._load_index()
+        #: 由 ExtensionRuntime 挂上，用于安装前先停掉同名子进程
+        self.stop_hook: Callable[[str], None] | None = None
 
     # ---------------------------------------------------------------- 索引
     def _load_index(self) -> dict[str, dict[str, Any]]:
@@ -200,11 +215,17 @@ class ExtensionManager:
                 )
 
             target = self.root / manifest.id
+            if self.stop_hook is not None:
+                # 升级/重装时子进程还占着 main.exe，先停掉再替换目录
+                try:
+                    self.stop_hook(manifest.id)
+                except Exception:  # noqa: BLE001 - 停不掉就靠下面的重试
+                    pass
             trash = None
             if target.exists():
                 trash = self.root / f"{TRASH_PREFIX}{uuid.uuid4().hex[:8]}"
-                os.replace(target, trash)
-            os.replace(staging, target)
+                _replace_with_retry(target, trash)
+            _replace_with_retry(staging, target)
 
             self._index[manifest.id] = {
                 "version": manifest.version,

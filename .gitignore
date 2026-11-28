@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -46,3 +46,8 @@ _*home*/
 _*home_real*/
 _shotcheck/
 pip-unpack-*/
+.IndexTranslateRuntime/
+_*out/
+_*.err
+_models_test/
+_*.txt

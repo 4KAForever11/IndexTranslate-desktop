@@ -24,8 +24,13 @@ class ExtensionRuntime(QObject):
         super().__init__(parent)
         self.manager = ExtensionManager(data_dir() / "extensions")
         self.manager.cleanup_leftovers()
+        # 安装/升级前先停掉同名子进程，否则 Windows 不让替换正在运行的 exe
+        self.manager.stop_hook = self.stop
         self._clients: dict[str, SidecarClient] = {}
-        self._models: dict[str, str] = {}
+        # 模型目录落盘在 settings 里，重启后要读回来，否则字幕永远认为「没选模型」
+        self._models: dict[str, str] = {
+            "ext-live-asr": str(settings.get("live_asr_model", "") or "")
+        }
 
     # ---------------------------------------------------------------- 基础
     @property

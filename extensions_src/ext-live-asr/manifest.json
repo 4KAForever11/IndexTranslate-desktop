@@ -1,15 +1,17 @@
 {
   "id": "ext-live-asr",
   "name": "系统音频实时字幕",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "entry": "main.py",
   "host_min": "2.0.0",
-  "description": "WASAPI 回环抓取系统播放的音频，VAD 断句后用 sherpa-onnx 离线识别，流式吐出双语字幕。",
+  "description": "WASAPI 回环抓取系统播放的音频，回调式采集不会因设备静音卡死，VAD 断句后用 sherpa-onnx 离线识别，流式吐出双语字幕。",
   "methods": [
     "ping",
+    "devices",
+    "test",
     "start",
     "stop"
   ],
-  "size_hint": "160–260 MB",
-  "model_hint": "需要单独下载 sherpa-onnx SenseVoice 模型目录（model.onnx + tokens.txt）"
+  "size_hint": "30–40 MB（模型另下 228 MB）",
+  "model_hint": "扩展中心「实时字幕设置」可一键下载 SenseVoice 多语种模型（model.int8.onnx + tokens.txt）"
 }
