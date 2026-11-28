@@ -1,7 +1,7 @@
 {
   "id": "ext-live-asr",
   "name": "系统音频实时字幕",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "entry": "main.py",
   "host_min": "2.0.0",
   "description": "WASAPI 回环抓取系统播放的音频，VAD 断句后用 sherpa-onnx 离线识别，流式吐出双语字幕。",

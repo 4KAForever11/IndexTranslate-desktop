@@ -20,17 +20,29 @@ import sys
 import traceback
 from typing import Any
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 log = sys.stderr
 
 MIN_BLOCK_CHARS = 1
 SKIP_KEYWORDS = ("http://", "https://", "www.")
 
 
+def _fitz_module():
+    # PyMuPDF 1.24 起正式包名是 pymupdf，fitz 只是兼容别名（2.x 会告警）。
+    try:
+        import pymupdf as _module  # noqa: PLC0415 - 可选依赖，调用时再导
+
+        return _module
+    except ImportError:
+        import fitz as _module  # noqa: PLC0415
+
+        return _module
+
+
 def _deps() -> dict[str, Any]:
     status: dict[str, Any] = {"fitz": False}
     try:
-        import fitz  # noqa: F401
+        _fitz_module()
 
         status["fitz"] = True
     except Exception:
@@ -44,9 +56,7 @@ def _require_fitz():
             "PDF 双语扩展不可用：缺少 PyMuPDF。"
             "请在扩展目录内执行 pip install pymupdf 后重启本扩展。"
         )
-    import fitz
-
-    return fitz
+    return _fitz_module()
 
 
 def _clean(text: str) -> str:
@@ -188,7 +198,7 @@ def render(params: dict[str, Any]) -> dict[str, Any]:
 def _rect_for(raw: Any):
     if not isinstance(raw, (list, tuple)) or len(raw) != 4:
         return None
-    import fitz
+    fitz = _fitz_module()
 
     return fitz.Rect(float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
 

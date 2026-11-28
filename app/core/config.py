@@ -16,11 +16,21 @@ from typing import Any
 APP_NAME = "IndexTranslate desktop"
 APP_PROJECT = "IndexTranslate-desktop"
 APP_SLUG = "IndexTranslate"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 API_BASE = "https://index-translate.bilibili.com/v1"
 SERVICE_HOME = "https://index-translate.bilibili.com/site/home.html"
 DEFAULT_MODEL = "Index-Translate-35B-A3B"
+
+# 官方分发渠道：只此一处。设置页与托盘都直接跳到这个地址，
+# 用户拿它核对下载来源，避免被同名改包的伪冒版本骗到。
+PROJECT_URL = "https://github.com/4KAForever11/IndexTranslate-desktop"
+PROJECT_RELEASES_URL = PROJECT_URL + "/releases"
+PROJECT_ISSUES_URL = PROJECT_URL + "/issues"
+# 扩展在线目录：仓库里的静态清单，扩展中心的「在线目录」直接读它。
+PROJECT_CATALOG_URL = (
+    "https://raw.githubusercontent.com/4KAForever11/IndexTranslate-desktop/main/extensions/catalog.json"
+)
 
 # (model id, short label shown in the UI)
 MODELS: list[tuple[str, str]] = [
@@ -147,7 +157,8 @@ DEFAULTS: dict[str, Any] = {
     "batch_last_dir": "",
     # 扩展（Sidecar 重型能力，按需下载，不进主安装包）
     "extension_idle_sec": 300,     # 空闲多久回收扩展进程（秒）
-    "extension_catalog": "",       # 扩展目录 URL（留空 = 只用本地 zip 安装）
+    # 扩展在线目录：默认指向官方仓库里的静态清单；改成空串就只用本地 zip 安装
+    "extension_catalog": PROJECT_CATALOG_URL,
     "ocr_overlay_enabled": True,   # 截屏翻译优先走本地 OCR 贴片
     "ocr_overlay_font_scale": 1.0,  # 贴片字号缩放
     "live_asr_model": "",          # sherpa-onnx 模型目录

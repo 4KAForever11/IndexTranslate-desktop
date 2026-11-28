@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QByteArray, QSysInfo, Qt, QTimer
-from PyQt6.QtGui import QIcon, QKeySequence, QShortcut
+from PyQt6.QtCore import QByteArray, QSysInfo, Qt, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices, QIcon, QKeySequence, QShortcut
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
 from qfluentwidgets import FluentIcon, FluentWindow, NavigationItemPosition, qconfig, setThemeColor
 
@@ -19,6 +19,7 @@ from ..core.config import (
     APP_NAME,
     DEFAULT_MODEL,
     MODEL_IDS,
+    PROJECT_URL,
     VERSION,
     data_dir,
     model_label,
@@ -199,6 +200,7 @@ class MainWindow(FluentWindow):
         tray.replaceRequested.connect(self.trigger_replace)
         tray.subtitleRequested.connect(self.toggle_live_subtitle)
         tray.extensionsRequested.connect(self.show_extensions)
+        tray.githubRequested.connect(self.open_official_page)
         self._sync_subtitle_action()
         tray.show()
         self.tray = tray
@@ -206,6 +208,11 @@ class MainWindow(FluentWindow):
     def show_extensions(self) -> None:
         self.show_from_tray()
         self.switchTo(self.extensions_page)
+
+    def open_official_page(self) -> None:
+        """打开官方仓库：用户拿它核对下载来源，防改包伪冒。"""
+        if not QDesktopServices.openUrl(QUrl(PROJECT_URL)):
+            self.tray.notify("无法打开浏览器", PROJECT_URL)
 
     # ------------------------------------------------------------- 实时字幕
     def _sync_subtitle_action(self) -> None:

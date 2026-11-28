@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "app": "IndexTranslate desktop",
+  "tag": "v2.1.0",
+  "extensions": [
+    {
+      "id": "ext-live-asr",
+      "name": "系统音频实时字幕",
+      "version": "1.1.0",
+      "host_min": "2.1.0",
+      "description": "WASAPI 回环抓取系统播放的音频，VAD 断句后用 sherpa-onnx 离线识别，流式吐出双语字幕。",
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.1.0/ext-live-asr-1.1.0.zip",
+      "sha256": "289e21729f7d3221ffd44b08c15eb7a013df09b60f4f11c4e01a02bd919748ff",
+      "size": 31162847,
+      "notes": "需要单独下载 sherpa-onnx SenseVoice 模型目录（model.onnx + tokens.txt）"
+    },
+    {
+      "id": "ext-ocr-overlay",
+      "name": "本地 OCR 原位贴片",
+      "version": "1.1.0",
+      "host_min": "2.1.0",
+      "description": "RapidOCR 本地识别截图文字并返回坐标，宿主在原位置绘制译文贴片，支持原文/译文透视切换。",
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.1.0/ext-ocr-overlay-1.1.0.zip",
+      "sha256": "ca41379a438da35fb6ed9e6535fc2ec359fbfa733f5a549fd1429a7f5f163afe",
+      "size": 98911054
+    },
+    {
+      "id": "ext-pdf-bilingual",
+      "name": "PDF 双语对照",
+      "version": "1.1.0",
+      "host_min": "2.1.0",
+      "description": "PyMuPDF 提取 PDF 文本块与坐标，交给批量队列翻译后合成左右对照版或原位重排单语版。",
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.1.0/ext-pdf-bilingual-1.1.0.zip",
+      "sha256": "fa110a27c0151d9344879f97662a961e93f3fdeeb72d3b196b6b555a3ddbd7a3",
+      "size": 143054975
+    }
+  ]
+}

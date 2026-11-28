@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.extvenv/
 
 # PyInstaller
 build/
@@ -27,6 +28,16 @@ Thumbs.db
 desktop.ini
 .DS_Store
 
-# ÁÙÊ±ÎÄ¼þ
+# ä¸´æ—¶æ–‡ä»¶
 _commit_msg.txt
 _*.local.*
+_*.log
+_*home/
+_shots.py
+_e2e*.py
+_probe*.py
+_t1*.py
+_t2*.py
+_t3*.py
+_t4*.py
+_cap.ps1

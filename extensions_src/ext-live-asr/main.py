@@ -28,7 +28,7 @@ import traceback
 import wave
 from typing import Any
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 TARGET_RATE = 16000
 log = sys.stderr
 

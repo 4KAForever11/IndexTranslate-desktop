@@ -27,14 +27,18 @@ param(
     [string]$Target = "host",
     [switch]$OneFile,
     [switch]$Both,
-    [switch]$SkipClean
+    [switch]$SkipClean,
+    # 扩展要打进 rapidocr / PyMuPDF / sherpa-onnx，用独立环境（.extvenv）构建，
+    # 免得主程序的依赖被这些重型轮子污染。
+    [string]$Python = ""
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
-$python = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "python" }
+$python = if ($Python) { $Python } elseif (Test-Path ".extvenv\Scripts\python.exe") { ".extvenv\Scripts\python.exe" } elseif (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "python" }
+$hostPython = if (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "python" }
 $appName = "IndexTranslate-desktop"
 
 # 版本号只维护 app/core/config.py 一处，打包产物自动跟随
@@ -44,7 +48,7 @@ Write-Host "version: $version" -ForegroundColor DarkGray
 
 Write-Host "[1/4] icon" -ForegroundColor Cyan
 if (-not (Test-Path "assets\icon.ico")) {
-    & $python tools\make_icon.py
+    & $hostPython tools\make_icon.py
 }
 
 $commonArgs = @(
@@ -69,7 +73,7 @@ $commonArgs = @(
 function Invoke-PyInstaller {
     param([string[]]$Extra)
     Write-Host "[2/4] pyinstaller $($Extra -join ' ')" -ForegroundColor Cyan
-    & $python -m PyInstaller @Extra @commonArgs
+    & $hostPython -m PyInstaller @Extra @commonArgs
     if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed with exit code $LASTEXITCODE" }
 }
 
@@ -121,7 +125,17 @@ function Build-Extensions {
 
         Write-Host ("  - {0} {1}" -f $extId, $extVersion) -ForegroundColor Cyan
         $workName = "$extId-main"
-        & $python -m PyInstaller @(
+
+        # 各扩展的依赖里带「数据文件」（模型、config.yaml、原生库），PyInstaller 只靠
+        # import 分析抓不到，必须 --collect-all，否则打出来的 exe 一跑就报缺少文件。
+        $collectArgs = switch ($extId) {
+            "ext-ocr-overlay" { @("--collect-all", "rapidocr_onnxruntime", "--collect-all", "onnxruntime") }
+            "ext-pdf-bilingual" { @("--collect-all", "pymupdf") }
+            "ext-live-asr" { @("--collect-all", "sherpa_onnx") }
+            default { @() }
+        }
+
+        $pyExtArgs = @(
             "--noconfirm", "--clean", "--onefile", "--console",
             # 同宿主一样：onefile 解压目录不能落在 %TEMP%（部分机器 / 安全软件会拒绝创建）。
             # 相对路径会按子进程的工作目录解析，而宿主启动扩展时 cwd 就是扩展自己的目录。
@@ -129,9 +143,9 @@ function Build-Extensions {
             "--name", $workName,
             "--distpath", (Join-Path $outDir ".build"),
             "--workpath", (Join-Path $outDir ".work-$extId"),
-            "--specpath", (Join-Path $outDir ".build"),
-            $entry
-        )
+            "--specpath", (Join-Path $outDir ".build")
+        ) + $collectArgs + @($entry)
+        & $python -m PyInstaller @pyExtArgs
         if ($LASTEXITCODE -ne 0) { throw "pyinstaller failed for $extId" }
 
         $stage = Join-Path $outDir (".stage-" + $extId)

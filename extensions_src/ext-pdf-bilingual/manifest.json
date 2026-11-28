@@ -1,7 +1,7 @@
 {
   "id": "ext-pdf-bilingual",
   "name": "PDF 双语对照",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "entry": "main.py",
   "host_min": "2.0.0",
   "description": "PyMuPDF 提取 PDF 文本块与坐标，交给批量队列翻译后合成左右对照版或原位重排单语版。",

@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QGuiApplication
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 from qfluentwidgets import (
     ComboBox,
     DoubleSpinBox,
+    FluentIcon,
     HyperlinkButton,
     InfoBar,
     InfoBarPosition,
@@ -34,7 +35,16 @@ from qfluentwidgets import (
 from ..core import i18n, settings
 from ..core.autostart import AutostartError, is_enabled as autostart_enabled
 from ..core.autostart import set_enabled as set_autostart
-from ..core.config import API_BASE, APP_PROJECT, MODELS, SERVICE_HOME, VERSION, data_dir
+from ..core.config import (
+    API_BASE,
+    APP_PROJECT,
+    MODELS,
+    PROJECT_RELEASES_URL,
+    PROJECT_URL,
+    SERVICE_HOME,
+    VERSION,
+    data_dir,
+)
 from ..core.proxy_manager import ProxyManager
 from ..core.sync.webdav_sync import SyncService
 from .theme import Card, Divider, MutedLabel, PageWidget, TextLabel
@@ -739,6 +749,27 @@ class SettingsPage(PageWidget):
         row.addStretch(1)
         body.addLayout(row)
 
+        # 官方分发渠道：软件里必须留一个能核对来源的入口，否则改包伪冒无从辨认。
+        official_row = QHBoxLayout()
+        official_row.setSpacing(8)
+        self.github_button = PrimaryPushButton(FluentIcon.GITHUB, "官方 GitHub 仓库")
+        self.github_button.setToolTip(PROJECT_URL)
+        self.github_button.clicked.connect(self._open_project_page)
+        releases_button = PushButton("下载与发行版")
+        releases_button.clicked.connect(self._open_releases_page)
+        official_row.addWidget(self.github_button)
+        official_row.addWidget(releases_button)
+        official_row.addStretch(1)
+        body.addLayout(official_row)
+        body.addWidget(
+            MutedLabel(
+                f"仅此一个官方渠道：{PROJECT_URL}\n"
+                "本软件没有任何其他下载站点；遇到同名软件请核对本页地址与版本号，"
+                "改包版本常伴随后门或广告注入。",
+                size=11,
+            )
+        )
+
         reset_button = PushButton("恢复默认设置")
         reset_button.clicked.connect(self._reset_settings)
         body.addWidget(reset_button, 0, Qt.AlignmentFlag.AlignLeft)
@@ -1093,6 +1124,22 @@ class SettingsPage(PageWidget):
             position=InfoBarPosition.TOP_RIGHT,
             parent=self,
         )
+
+    def _open_project_page(self) -> None:
+        self._open_url(PROJECT_URL, "无法打开浏览器")
+
+    def _open_releases_page(self) -> None:
+        self._open_url(PROJECT_RELEASES_URL, "无法打开浏览器")
+
+    def _open_url(self, url: str, error_title: str) -> None:
+        if not QDesktopServices.openUrl(QUrl(url)):
+            InfoBar.error(
+                title=error_title,
+                content=f"请手动访问：{url}",
+                duration=5000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
 
     def _open_data_dir(self) -> None:
         path = Path(data_dir())

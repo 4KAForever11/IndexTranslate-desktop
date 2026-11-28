@@ -54,6 +54,7 @@ class TrayIcon(QSystemTrayIcon):
     replaceRequested = pyqtSignal()
     subtitleRequested = pyqtSignal()
     extensionsRequested = pyqtSignal()
+    githubRequested = pyqtSignal()
     minimizeToTrayChanged = pyqtSignal(bool)
     autostartChanged = pyqtSignal(bool)
 
@@ -92,6 +93,11 @@ class TrayIcon(QSystemTrayIcon):
         extensions_action = Action("扩展中心…", parent=self._menu)
         extensions_action.triggered.connect(self.extensionsRequested.emit)
         self._menu.addAction(extensions_action)
+
+        # 托盘里也留官方入口：改包伪冒最常见的入口就是「同名软件的另一份 exe」。
+        self.github_action = Action("官方 GitHub 仓库…", parent=self._menu)
+        self.github_action.triggered.connect(self.githubRequested.emit)
+        self._menu.addAction(self.github_action)
         self._menu.addSeparator()
 
         self.proxy_action = Action("本地代理：未启动", parent=self._menu)
