@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QPoint, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QSystemTrayIcon
 
 from qfluentwidgets import Action, RoundMenu
@@ -65,26 +65,33 @@ class TrayIcon(QSystemTrayIcon):
 
         self._menu = RoundMenu(parent=None)
         self._build_menu()
-        self.setContextMenu(self._menu)
+        # 不用 setContextMenu：RoundMenu 是自绘的 QWidget 菜单，交给系统按光标位置弹时
+        # 不会自己翻到屏幕内侧，托盘在右下角时最下面的「退出」就被裁掉了。
         self.activated.connect(self._on_activated)
 
     # -------------------------------------------------------------------- menu
     def _build_menu(self) -> None:
+        self._menu.setMinimumWidth(236)
+
         self.open_action = Action("打开主窗口", parent=self._menu)
         self.open_action.triggered.connect(self.showRequested.emit)
         self._menu.addAction(self.open_action)
 
-        self.popup_action = Action("划词翻译  Ctrl+Alt+T", parent=self._menu)
+        # 划词/截屏/替换收进子菜单：托盘菜单一旦超过屏幕高度，
+        # 最下面的「退出」就被挤出去了（Win10 上特别常见）。
+        self.tools_menu = RoundMenu("划词与截屏", parent=self._menu)
+        self.popup_action = Action("划词翻译", parent=self.tools_menu)
         self.popup_action.triggered.connect(self.popupRequested.emit)
-        self._menu.addAction(self.popup_action)
+        self.tools_menu.addAction(self.popup_action)
 
-        self.shot_action = Action("截屏翻译  Ctrl+Alt+S", parent=self._menu)
+        self.shot_action = Action("截屏翻译", parent=self.tools_menu)
         self.shot_action.triggered.connect(self.screenshotRequested.emit)
-        self._menu.addAction(self.shot_action)
+        self.tools_menu.addAction(self.shot_action)
 
-        self.replace_action = Action("输入框替换  Ctrl+Alt+R", parent=self._menu)
+        self.replace_action = Action("输入框替换", parent=self.tools_menu)
         self.replace_action.triggered.connect(self.replaceRequested.emit)
-        self._menu.addAction(self.replace_action)
+        self.tools_menu.addAction(self.replace_action)
+        self._menu.addMenu(self.tools_menu)
 
         self.subtitle_action = Action("实时字幕（系统音频）", parent=self._menu, checkable=True)
         self.subtitle_action.triggered.connect(self.subtitleRequested.emit)
@@ -117,9 +124,9 @@ class TrayIcon(QSystemTrayIcon):
         self._menu.addAction(self.autostart_action)
 
         self._menu.addSeparator()
-        quit_action = Action("退出", parent=self._menu)
-        quit_action.triggered.connect(self.quitRequested.emit)
-        self._menu.addAction(quit_action)
+        self.quit_action = Action("退出", parent=self._menu)
+        self.quit_action.triggered.connect(self.quitRequested.emit)
+        self._menu.addAction(self.quit_action)
 
     # ------------------------------------------------------------------ update
     def set_proxy_running(self, running: bool, url: str = "") -> None:
@@ -157,6 +164,29 @@ class TrayIcon(QSystemTrayIcon):
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
             self.showRequested.emit()
+        elif reason == QSystemTrayIcon.ActivationReason.Context:
+            self.popup_menu()
+
+    def popup_menu(self, anchor: QPoint | None = None) -> None:
+        """在托盘图标旁边弹出菜单，并保证整块菜单落在可用屏幕内。"""
+        menu = self._menu
+        menu.ensurePolished()
+        menu.adjustSize()
+        size = menu.size()
+        anchor = anchor or QCursor.pos()
+        screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry() if screen else None
+        if area is None:
+            menu.popup(anchor)
+            return
+        x = anchor.x() - size.width() // 2
+        x = max(area.left() + 4, min(x, area.right() - size.width() - 4))
+        y = anchor.y() - size.height() - 8
+        if y < area.top() + 4:
+            y = area.top() + 4
+        if y + size.height() > area.bottom() - 4:
+            y = max(area.top() + 4, area.bottom() - size.height() - 4)
+        menu.popup(QPoint(x, y))
 
     def notify(self, title: str, message: str, *, msec: int = 4000) -> None:
         if not self.supportsMessages():

@@ -385,7 +385,11 @@ class AsrSetupCard(Card):
         self._device_combo.clear()
         self._device_combo.addItem("自动（跟随系统默认输出）", userData="")
         for info in devices:
-            label = str(info.get("name") or "")
+            # 名字里若混进 U+FFFD（老版本扩展解坏的字节），界面上一律不显示「◆」；
+            # 前面带序号，名字再怪也能靠序号分辨。
+            raw = str(info.get("name") or "")
+            name = " ".join(raw.replace("\ufffd", "").replace("◆", "").split()) or "未命名设备"
+            label = f"#{int(info.get('index') or 0)}  {name}"
             if info.get("default"):
                 label += "  · 默认"
             self._device_combo.addItem(label, userData=str(info.get("index")))

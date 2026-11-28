@@ -1,38 +1,38 @@
 {
   "version": 1,
   "app": "IndexTranslate desktop",
-  "tag": "v2.2.0",
+  "tag": "v2.2.1",
   "extensions": [
     {
       "id": "ext-live-asr",
       "name": "系统音频实时字幕",
-      "version": "1.2.0",
-      "host_min": "2.2.0",
+      "version": "1.2.1",
+      "host_min": "2.2.1",
       "description": "WASAPI 回环抓取系统播放的音频，回调式采集不会因设备静音卡死，VAD 断句后用 sherpa-onnx 离线识别，流式吐出双语字幕。",
-      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.0/ext-live-asr-1.2.0.zip",
-      "sha256": "3fce962503ab59d5e306db33231b1b07a4ee3fbd9fc57a356c2dde11fd6b3088",
-      "size": 31129740,
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.1/ext-live-asr-1.2.1.zip",
+      "sha256": "7cb8e81736052e457431c14f3c0990773b13e2b44f5b93adddddaab588ef24ce",
+      "size": 31131717,
       "notes": "扩展中心「实时字幕设置」可一键下载 SenseVoice 多语种模型（model.int8.onnx + tokens.txt）"
     },
     {
       "id": "ext-ocr-overlay",
       "name": "本地 OCR 原位贴片",
       "version": "1.1.0",
-      "host_min": "2.2.0",
+      "host_min": "2.2.1",
       "description": "RapidOCR 本地识别截图文字并返回坐标，宿主在原位置绘制译文贴片，支持原文/译文透视切换。",
-      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.0/ext-ocr-overlay-1.1.0.zip",
-      "sha256": "0e524f918c86a1a6574da6b165c18ecf07d08e47ac737c8b5e73c908c099423e",
-      "size": 98909520
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.1/ext-ocr-overlay-1.1.0.zip",
+      "sha256": "ca5af047ef164dee479c9d55807bd2b842ac90485e32e10a8d2f24cd65b6b6b1",
+      "size": 98911299
     },
     {
       "id": "ext-pdf-bilingual",
       "name": "PDF 双语对照",
       "version": "1.1.0",
-      "host_min": "2.2.0",
+      "host_min": "2.2.1",
       "description": "PyMuPDF 提取 PDF 文本块与坐标，交给批量队列翻译后合成左右对照版或原位重排单语版。",
-      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.0/ext-pdf-bilingual-1.1.0.zip",
-      "sha256": "579da5e1e0c2f7467eb8a2062126afe75e3e2c6783ddef862fdcc915a30cfc39",
-      "size": 143053031
+      "url": "https://github.com/4KAForever11/IndexTranslate-desktop/releases/download/v2.2.1/ext-pdf-bilingual-1.1.0.zip",
+      "sha256": "04e5acca0a1f6ee86ae079f108b93c569b9110846cf1c73294c9f6e2af5745ec",
+      "size": 143051249
     }
   ]
 }

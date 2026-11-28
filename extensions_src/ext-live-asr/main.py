@@ -25,17 +25,26 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
 import traceback
 from typing import Any
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 TARGET_RATE = 16000
 FRAME = 1024
 MODEL_FILES = ("model.int8.onnx", "model.onnx")
 log = sys.stderr
+
+# 宿主按 UTF-8 读我们的 stdout：这里先把标准流锁成 UTF-8，
+# 否则中文设备名会以 GBK 字节写出，宿主解出来就是一串「◆」。
+for _stream in (sys.stdout, sys.stdin):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 - 老解释器/被重定向过就算了
+        pass
 
 _state = {
     "thread": None,
@@ -73,21 +82,102 @@ def _emit(event: str, data: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------- 设备
+def _registry_friendly_names() -> list[str]:
+    """从注册表读所有「播放设备」的友好名（带中文，例如「耳机 (HyperX ...)」）。
+
+    PortAudio 给的名字在部分驱动上会被 C 层按 UTF-8 硬解成 U+FFFD，
+    中文就彻底丢了；注册表里存的是原始 UTF-16 名字，拿它来对照补回。
+    """
+    try:
+        import winreg
+    except Exception:  # noqa: BLE001 - 非 Windows 直接跳过
+        return []
+    root = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
+    prop = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"
+    names: list[str] = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, root) as key:
+            index = 0
+            while True:
+                try:
+                    guid = winreg.EnumKey(key, index)
+                except OSError:
+                    break
+                index += 1
+                try:
+                    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f"{root}\\{guid}\\Properties") as props:
+                        value, _ = winreg.QueryValueEx(props, prop)
+                except OSError:
+                    continue
+                text = str(value or "").strip()
+                if text and text not in names:
+                    names.append(text)
+    except OSError:
+        return []
+    return names
+
+
+def _repair_from_registry(name: str, pool: list[str]) -> str:
+    """用注册表里的名字补回被解坏的部分（按括号里的型号名匹配）。"""
+    if not pool or "\ufffd" not in name:
+        return name
+    match = re.search(r"\(([^()]*)\)", name)
+    if not match:
+        return name
+    needle = match.group(1).strip().lower()
+    if not needle:
+        return name
+    for candidate in pool:
+        if needle in candidate.lower():
+            return candidate + (" [Loopback]" if "loopback" in name.lower() else "")
+    return name
+
+
+def _clean_name(raw: Any) -> str:
+    """把 PortAudio 给的设备名还原成干净文本。
+
+    各家声卡驱动给出的字节编码并不统一（UTF-8 / GBK / 系统 ANSI 都有），
+    pyaudiowpatch 的 C 层有时直接按 UTF-8 replace 解，中文就成了一串 U+FFFD，
+    在界面上显示为「◆◆◆◆◆」。能还原就还原，还原不了至少把坏字符去掉，
+    留下还能认出来的英文部分（例如 "(HyperX ...) [Loopback]"）。
+    """
+    text = ""
+    if isinstance(raw, (bytes, bytearray)):
+        data = bytes(raw)
+        for encoding in ("utf-8", "gbk", "cp936", "mbcs"):
+            try:
+                text = data.decode(encoding)
+                break
+            except (UnicodeDecodeError, LookupError):
+                text = ""
+    else:
+        text = str(raw or "")
+    text = text.replace("\x00", "")
+    if "\ufffd" in text:
+        text = re.sub(r"\ufffd+", "", text)
+    return " ".join(text.split()).strip()
+
+
 def _loopback_devices(pa) -> list[dict[str, Any]]:
     """列出所有 WASAPI 回环设备（就是「系统正在播放」的那条输出）。"""
     import pyaudiowpatch as pyaudio
 
     wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
     try:
-        default_out = pa.get_device_info_by_index(int(wasapi["defaultOutputDevice"]))["name"]
+        default_out = _clean_name(pa.get_device_info_by_index(int(wasapi["defaultOutputDevice"]))["name"])
     except Exception:  # noqa: BLE001
         default_out = ""
     devices: list[dict[str, Any]] = []
+    pool = _registry_friendly_names()
     for info in pa.get_loopback_device_info_generator():
-        name = str(info["name"])
+        index = int(info["index"])
+        raw_name = info["name"]
+        text = raw_name if isinstance(raw_name, str) else _clean_name(raw_name)
+        text = _repair_from_registry(text, pool)
+        name = _clean_name(text) or f"回环设备 #{index}"
         devices.append(
             {
-                "index": int(info["index"]),
+                "index": index,
                 "name": name,
                 "default": bool(default_out) and default_out in name,
                 "rate": int(info["defaultSampleRate"]),

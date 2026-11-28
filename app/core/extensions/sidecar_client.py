@@ -151,6 +151,8 @@ class SidecarClient:
             try:
                 env = os.environ.copy()
                 env.setdefault("PYTHONIOENCODING", "utf-8")
+                env.setdefault("PYTHONUTF8", "1")
+                env.setdefault("PYTHONLEGACYWINDOWSSTDIO", "0")
                 env.update(self._env_extra)
                 flags = CREATE_NO_WINDOW if os.name == "nt" else 0
                 try:

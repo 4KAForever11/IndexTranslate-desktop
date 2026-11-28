@@ -236,13 +236,15 @@ class MainWindow(FluentWindow):
             self._sync_subtitle_action()
             return
         geometry = str(settings.get("live_subtitle_geometry", "") or "")
-        if geometry:
-            self.subtitle_bar.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
-        else:
-            self.subtitle_bar.move_to_default()
-        self.subtitle_bar.show()
-        self.subtitle_bar.raise_()
+        self.subtitle_bar.apply_saved_geometry(geometry)
+        self.subtitle_bar.ensure_visible()
         self._sync_subtitle_action()
+        if self.tray is not None:
+            self.tray.notify(
+                "实时字幕已开启",
+                "识别到声音后，字幕条会出现在屏幕底部（可拖动，点右上角 × 关闭）。",
+                msec=3500,
+            )
 
     def _on_subtitle_failed(self, message: str) -> None:
         was_running = self.subtitle.running

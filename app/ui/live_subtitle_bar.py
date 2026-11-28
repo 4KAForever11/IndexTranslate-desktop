@@ -10,7 +10,7 @@ import threading
 from collections import deque
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QObject, QPoint, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPainterPath
 from PyQt6.QtWidgets import QWidget
 from qfluentwidgets import FluentIcon, TransparentToolButton
@@ -54,6 +54,12 @@ class SubtitleBar(QWidget):
         self._close_button.move(BAR_WIDTH - 38, 8)
         self._close_button.clicked.connect(self.close_bar)
 
+        # 有些窗口管理器会把 Tool 窗口压到别的窗口下面（尤其边框全屏的视频播放器），
+        # 定时把自己再抬一次，比只 show() 一次可靠得多。
+        self._keep_on_top = QTimer(self)
+        self._keep_on_top.setInterval(2500)
+        self._keep_on_top.timeout.connect(self._tick_topmost)
+
     # ---------------------------------------------------------------- 内容
     def set_text(self, source: str, translated: str, *, status: str = "") -> None:
         self._source = (source or "").strip()
@@ -89,11 +95,61 @@ class SubtitleBar(QWidget):
 
     def move_to_default(self) -> None:
         screen = QGuiApplication.primaryScreen()
-        area = screen.availableGeometry()
+        area = screen.availableGeometry() if screen else None
+        if area is None:
+            return
+        width = min(BAR_WIDTH, max(320, area.width() - 40))
+        self.setFixedSize(width, BAR_HEIGHT)
         self.move(
-            area.center().x() - BAR_WIDTH // 2,
+            area.center().x() - width // 2,
             area.bottom() - BAR_HEIGHT - 72,
         )
+
+    # ------------------------------------------------------------ 可见性自检
+    def apply_saved_geometry(self, encoded: str) -> None:
+        """恢复上次的位置；越界（换过显示器/分辨率）就回到默认位置。"""
+        restored = False
+        if encoded:
+            try:
+                restored = bool(
+                    self.restoreGeometry(QByteArray.fromBase64(encoded.encode("ascii")))
+                )
+            except Exception:  # noqa: BLE001 - 坏数据不该挡住显示
+                restored = False
+        if not restored or not self._on_some_screen(self.frameGeometry()):
+            self.move_to_default()
+
+    @staticmethod
+    def _on_some_screen(rect) -> bool:
+        for screen in QGuiApplication.screens():
+            hit = screen.availableGeometry().intersected(rect)
+            # 至少要露出一块能看清/能拖的区域，否则等于没显示
+            if hit.width() >= 160 and hit.height() >= 60:
+                return True
+        return False
+
+    def ensure_visible(self) -> None:
+        """把字幕条摆到能看见的地方，并在顶层重新亮一次。"""
+        if not self._on_some_screen(self.frameGeometry()):
+            self.move_to_default()
+        if not self.isVisible():
+            self.show()
+        self.raise_()
+
+    def _tick_topmost(self) -> None:
+        if not self.isVisible():
+            self._keep_on_top.stop()
+            return
+        self.raise_()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._keep_on_top.isActive():
+            self._keep_on_top.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._keep_on_top.stop()
+        super().hideEvent(event)
 
     # ---------------------------------------------------------------- 绘制
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -317,6 +373,7 @@ class LiveSubtitleController(QObject):
         )
 
         def worker() -> None:
+            translated = ""
             try:
                 result = ""
                 for chunk in get_pipeline().execute_stream(request, self._cancel):
@@ -324,11 +381,10 @@ class LiveSubtitleController(QObject):
                         result += chunk.delta
                 translated = result.strip()
             except EngineError as exc:
-                self.failed.emit(exc.message)
-                translated = ""
-            except Exception as exc:  # 网络以外的意外，也只报一句
-                self.failed.emit(_friendly(exc))
-                translated = ""
+                # 单句翻译失败不能把整场字幕关掉：状态栏报一句，下一句继续试
+                self.statusChanged.emit(f"这一句没翻出来：{exc.message[:80]}")
+            except Exception as exc:  # noqa: BLE001 - 网络以外的意外也只报一句
+                self.statusChanged.emit(f"这一句没翻出来：{_friendly(exc)[:80]}")
             finally:
                 with self._lock:
                     self._busy = False
