@@ -151,26 +151,59 @@ def catalog_url(default: str = "") -> str:
     return value or default or PROJECT_CATALOG_URL
 
 
-def fetch_catalog(url: str | None = None, *, timeout: float = FETCH_TIMEOUT) -> list[CatalogEntry]:
-    """从目录地址拉取清单。失败时抛出带中文说明的 CatalogError。"""
+def _mirror_url(target: str) -> str:
+    """把 raw.githubusercontent 地址换成 jsDelivr 镜像（国内通常更稳）。"""
+    prefix = "https://raw.githubusercontent.com/"
+    if not target.startswith(prefix):
+        return ""
+    rest = target[len(prefix):]
+    parts = rest.split("/")
+    if len(parts) < 3:
+        return ""
+    owner, repo, ref = parts[0], parts[1], parts[2]
+    tail = "/".join(parts[3:])
+    return f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{ref}/{tail}"
+
+
+def _get(url: str, timeout: float):
     from ...core.api_client import new_client
 
+    with new_client(timeout) as client:
+        return client.get(url)
+
+
+def fetch_catalog(url: str | None = None, *, timeout: float = FETCH_TIMEOUT) -> list[CatalogEntry]:
+    """从目录地址拉取清单。失败时抛出带中文说明的 CatalogError。"""
     target = (url or catalog_url()).strip()
     if not target:
         raise CatalogError("没有配置扩展目录地址（设置 → 扩展中心 → 目录地址）。")
     if not target.lower().startswith(("http://", "https://")):
         raise CatalogError("目录地址必须以 http:// 或 https:// 开头。")
-    try:
-        with new_client(timeout) as client:
-            response = client.get(target)
-    except Exception as exc:  # noqa: BLE001 - 网络异常统一转成用户可读文案
-        raise CatalogError(f"无法访问扩展目录：{exc}") from exc
 
-    if response.status_code == 404:
-        raise CatalogError("扩展目录不存在（404），可能是仓库还没发布清单。")
-    if response.status_code >= 400:
-        raise CatalogError(f"扩展目录返回 HTTP {response.status_code}。")
-    return parse_catalog(response.content)
+    attempts = [target]
+    mirror = _mirror_url(target)
+    if mirror:
+        attempts.append(mirror)
+
+    first_error: Exception | None = None
+    for index, candidate in enumerate(attempts):
+        try:
+            response = _get(candidate, timeout)
+        except Exception as exc:  # noqa: BLE001 - 网络异常统一转成用户可读文案
+            if index == 0:
+                first_error = exc
+                continue
+            raise CatalogError(f"无法访问扩展目录：{first_error}（镜像也失败：{exc}）") from exc
+        if response.status_code == 404:
+            raise CatalogError("扩展目录不存在（404），可能是仓库还没发布清单。")
+        if response.status_code >= 400:
+            if index == 0 and len(attempts) > 1:
+                first_error = CatalogError(f"扩展目录返回 HTTP {response.status_code}。")
+                continue
+            raise CatalogError(f"扩展目录返回 HTTP {response.status_code}。")
+        return parse_catalog(response.content)
+
+    raise CatalogError(f"无法访问扩展目录：{first_error}")
 
 
 def entry_for(entries: Iterable[CatalogEntry], ext_id: str) -> CatalogEntry | None:

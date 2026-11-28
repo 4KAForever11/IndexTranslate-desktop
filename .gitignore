@@ -41,3 +41,8 @@ _t2*.py
 _t3*.py
 _t4*.py
 _cap.ps1
+_*.py
+_*home*/
+_*home_real*/
+_shotcheck/
+pip-unpack-*/

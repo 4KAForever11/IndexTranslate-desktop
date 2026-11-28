@@ -106,5 +106,66 @@ class CatalogParseTests(unittest.TestCase):
         self.assertIsNone(entry_for(entries, "ext-b"))
 
 
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes = b"{}") -> None:
+        self.status_code = status
+        self.content = body
+
+
+class CatalogFallbackTests(unittest.TestCase):
+    def test_mirror_url_from_raw(self) -> None:
+        from app.core.extensions.catalog import _mirror_url
+
+        self.assertEqual(
+            _mirror_url(
+                "https://raw.githubusercontent.com/u/r/main/extensions/catalog.json"
+            ),
+            "https://cdn.jsdelivr.net/gh/u/r@main/extensions/catalog.json",
+        )
+        self.assertEqual(_mirror_url("https://example.com/catalog.json"), "")
+
+    def test_falls_back_to_mirror_when_raw_times_out(self) -> None:
+        from app.core.extensions import catalog as module
+
+        body = json.dumps({"extensions": [{"id": "ext-a", "url": "https://e.com/a.zip"}]}).encode()
+        seen: list[str] = []
+
+        def fake_get(url: str, timeout: float):  # noqa: ANN001 - 测试替身
+            seen.append(url)
+            if url.startswith("https://raw.githubusercontent.com/"):
+                raise OSError("handshake timed out")
+            return _FakeResponse(200, body)
+
+        original = module._get
+        module._get = fake_get
+        try:
+            entries = module.fetch_catalog(
+                "https://raw.githubusercontent.com/u/r/main/extensions/catalog.json"
+            )
+        finally:
+            module._get = original
+
+        self.assertEqual([entry.id for entry in entries], ["ext-a"])
+        self.assertEqual(len(seen), 2, "先试原地址，再试镜像")
+        self.assertTrue(seen[1].startswith("https://cdn.jsdelivr.net/gh/"))
+
+    def test_raises_when_both_fail(self) -> None:
+        from app.core.extensions import catalog as module
+
+        def fake_get(url: str, timeout: float):  # noqa: ANN001 - 测试替身
+            raise OSError("boom")
+
+        original = module._get
+        module._get = fake_get
+        try:
+            with self.assertRaises(CatalogError) as ctx:
+                module.fetch_catalog(
+                    "https://raw.githubusercontent.com/u/r/main/extensions/catalog.json"
+                )
+        finally:
+            module._get = original
+        self.assertIn("镜像也失败", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
