@@ -615,6 +615,9 @@ class ExtensionsPage(PageWidget):
         self._catalog_worker: CatalogWorker | None = None
         self._install_worker: CatalogInstallWorker | None = None
         self._catalog_auto = False
+        self._update_queue: list[CatalogEntry] = []
+        self._update_total = 0
+        self._update_done = 0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 20)
@@ -801,6 +804,14 @@ class ExtensionsPage(PageWidget):
         refresh_button.setEnabled(self._catalog_worker is None)
         refresh_button.clicked.connect(self.load_catalog)
         head.addWidget(refresh_button)
+        update_button = PushButton(FluentIcon.UPDATE, "全部更新")
+        pending = self._pending_updates()
+        update_button.setToolTip(
+            "按在线目录把所有可更新的扩展一次装好" if pending else "所有扩展都是最新版"
+        )
+        update_button.setEnabled(bool(pending) and self._install_worker is None)
+        update_button.clicked.connect(self._update_all_from_catalog)
+        head.addWidget(update_button)
         url_button = PushButton("换地址")
         url_button.setToolTip("GitHub 打不开时可以换成自己的镜像地址")
         url_button.clicked.connect(self._edit_catalog_url)
@@ -911,7 +922,21 @@ class ExtensionsPage(PageWidget):
 
     def _on_catalog_loaded(self, entries) -> None:
         self._catalog = list(entries)
-        self._catalog_state = f"共 {len(self._catalog)} 个扩展"
+        pending = self._pending_updates()
+        installed = {row["id"] for row in self._runtime.status()}
+        missing = [
+            entry
+            for entry in self._catalog
+            if entry.id not in installed and entry.host_ok(self._runtime.host_version)
+        ]
+        parts = [f"共 {len(self._catalog)} 个扩展"]
+        if pending:
+            parts.append(f"{len(pending)} 个可更新")
+        if missing:
+            parts.append(f"{len(missing)} 个可安装")
+        if not pending and not missing:
+            parts.append("都是最新版")
+        self._catalog_state = " · ".join(parts)
         self.refresh()
 
     def _on_catalog_failed(self, message: str) -> None:
@@ -925,6 +950,25 @@ class ExtensionsPage(PageWidget):
         if worker is not None:
             worker.deleteLater()
         self.refresh(keep_cards=True)
+
+    def _pending_updates(self) -> list[CatalogEntry]:
+        """已安装、且目录里版本更新的扩展。
+
+        没装过的条目只算「可安装」，不该顶掉「全部更新」的语义。
+        """
+        if not self._catalog:
+            return []
+        rows = {row["id"]: row for row in self._runtime.status()}
+        pending: list[CatalogEntry] = []
+        for entry in self._catalog:
+            if not entry.host_ok(self._runtime.host_version):
+                continue
+            have = rows.get(entry.id)
+            if have is None:
+                continue
+            if have.get("version") != entry.version:
+                pending.append(entry)
+        return pending
 
     def _install_from_catalog(self, entry: CatalogEntry) -> None:
         if self._install_worker is not None:
@@ -940,8 +984,45 @@ class ExtensionsPage(PageWidget):
         worker.finished.connect(self._on_catalog_install_finished)
         worker.start()
 
+    def _update_all_from_catalog(self) -> None:
+        """把目录里所有能更新的扩展排成队列，一个一个装。"""
+        if self._install_worker is not None:
+            return
+        pending = self._pending_updates()
+        if not pending:
+            self._catalog_state = "所有扩展都是最新版"
+            self.refresh(keep_cards=True)
+            return
+        self._update_queue = list(pending)
+        self._update_total = len(pending)
+        self._update_done = 0
+        self._install_next_queued()
+
+    def _install_next_queued(self) -> None:
+        if self._install_worker is not None:
+            return
+        if not self._update_queue:
+            self._catalog_state = f"已更新 {self._update_done} 个扩展"
+            self.refresh(keep_cards=True)
+            return
+        entry = self._update_queue.pop(0)
+        self._catalog_state = (
+            f"正在更新 {entry.name}（{self._update_done + 1}/{self._update_total}）…"
+        )
+        self.refresh(keep_cards=True)
+        worker = CatalogInstallWorker(
+            entry, self._runtime.manager, self._runtime.host_version, self
+        )
+        self._install_worker = worker
+        worker.done.connect(self._on_catalog_installed)
+        worker.failed.connect(self._on_catalog_install_failed)
+        worker.finished.connect(self._on_catalog_install_finished)
+        worker.start()
+
     def _on_catalog_installed(self, installed) -> None:
         self._catalog_state = f"已安装 {installed.manifest.name} v{installed.manifest.version}"
+        if self._update_total:
+            self._update_done += 1
         InfoBar.success(
             "扩展已安装",
             f"{installed.manifest.name} v{installed.manifest.version}",
@@ -953,6 +1034,8 @@ class ExtensionsPage(PageWidget):
 
     def _on_catalog_install_failed(self, message: str) -> None:
         self._catalog_state = "安装失败"
+        self._update_queue = []
+        self._update_total = 0
         InfoBar.error(
             "安装失败",
             message,
@@ -968,6 +1051,8 @@ class ExtensionsPage(PageWidget):
         if worker is not None:
             worker.deleteLater()
         self.refresh(keep_cards=True)
+        if self._update_queue:
+            self._install_next_queued()
 
     def _install(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

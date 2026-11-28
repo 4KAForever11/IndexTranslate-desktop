@@ -175,6 +175,7 @@ DEFAULTS: dict[str, Any] = {
     "sync_last_result": "",
     # 自动更新
     "update_channel": "stable",
+    "update_check_on_start": True,   # 启动 6 秒后自动查一次（仅打包版）
     "update_checked_at": 0.0,
     "update_skip_version": "",
     # 外观 / 语言

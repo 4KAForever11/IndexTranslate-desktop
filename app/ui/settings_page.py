@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QFont, QGuiApplication
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -23,6 +24,7 @@ from qfluentwidgets import (
     LineEdit,
     PasswordLineEdit,
     PrimaryPushButton,
+    ProgressBar,
     PushButton,
     SmoothScrollArea,
     SpinBox,
@@ -47,7 +49,7 @@ from ..core.config import (
 )
 from ..core.proxy_manager import ProxyManager
 from ..core.sync.webdav_sync import SyncService
-from .theme import Card, Divider, MutedLabel, PageWidget, TextLabel
+from .theme import Card, MutedLabel, PageWidget, TextLabel
 
 THEMES = [("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
 
@@ -76,12 +78,27 @@ class SettingsPage(PageWidget):
         self._proxy_manager = proxy_manager
         self._sync_service = sync_service
         self._updater = None
+        self._update_worker = None
+        self._download_worker = None
+        self._last_status = None
+        self._auto_checked = False
         self._busy_sync = False
         self._build_ui()
         self._sync_from_settings()
         self._proxy_manager.started.connect(self._on_proxy_started)
         self._proxy_manager.stopped.connect(self._on_proxy_stopped)
         self._proxy_manager.failed.connect(self._on_proxy_failed)
+        # 启动 6 秒后再查（先把首屏和翻译服务热起来），只查一次。
+        QTimer.singleShot(6000, self._auto_check_once)
+
+    def _on_update_auto_changed(self, checked: bool) -> None:
+        self._save("update_check_on_start", bool(checked))
+
+    def _auto_check_once(self) -> None:
+        if self._auto_checked:
+            return
+        self._auto_checked = True
+        self._auto_check_update()
 
     # --------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -108,6 +125,7 @@ class SettingsPage(PageWidget):
         layout.addWidget(self._build_core_card())
         layout.addWidget(self._build_appearance_card())
         layout.addWidget(self._build_sync_card())
+        layout.addWidget(self._build_update_card())
         layout.addWidget(self._build_system_card())
         layout.addWidget(self._build_proxy_card())
         layout.addWidget(self._build_proxy_optimize_card())
@@ -357,23 +375,53 @@ class SettingsPage(PageWidget):
         actions.addWidget(self.sync_now_button)
         actions.addWidget(self.sync_state, 1)
         body.addLayout(actions)
+        return card
 
-        self._sync_card_divider = Divider()
-        body.addWidget(self._sync_card_divider)
+    def _build_update_card(self) -> Card:
+        card, body = self._card("软件更新")
+        body.addWidget(
+            MutedLabel(
+                "读 GitHub Releases 判断新旧：后台下载并校验 SHA-256，"
+                "再由临时脚本替换、自动重启。",
+                size=11,
+            )
+        )
 
-        update_row = QHBoxLayout()
-        update_row.setSpacing(8)
-        update_row.addWidget(_title_label("当前版本"))
+        info = QHBoxLayout()
+        info.setSpacing(8)
+        info.addWidget(_title_label("当前版本"))
         self.update_version_label = MutedLabel(VERSION, size=12)
-        update_row.addWidget(self.update_version_label)
-        update_row.addStretch(1)
+        info.addWidget(self.update_version_label)
+        info.addStretch(1)
         self.update_check_button = PushButton("检查更新")
         self.update_check_button.setFixedHeight(34)
         self.update_check_button.clicked.connect(self._check_update)
-        update_row.addWidget(self.update_check_button)
-        body.addLayout(update_row)
+        info.addWidget(self.update_check_button)
+        body.addLayout(info)
+
+        auto = QHBoxLayout()
+        auto.setSpacing(8)
+        title = QVBoxLayout()
+        title.setSpacing(2)
+        title.addWidget(_title_label("启动时自动检查"))
+        title.addWidget(MutedLabel("启动 6 秒后在后台查一次，不打扰使用", size=11))
+        auto.addLayout(title)
+        auto.addStretch(1)
+        self.update_auto_switch = SwitchButton()
+        self.update_auto_switch.setToolTip("启动后自动检查一次新版本")
+        self.update_auto_switch.setOnText("")
+        self.update_auto_switch.setOffText("")
+        self.update_auto_switch.checkedChanged.connect(self._on_update_auto_changed)
+        auto.addWidget(self.update_auto_switch)
+        body.addLayout(auto)
+
         self.update_state = MutedLabel("", size=11)
         body.addWidget(self.update_state)
+        self.update_progress = ProgressBar()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.setVisible(False)
+        body.addWidget(self.update_progress)
         return card
 
     def _build_system_card(self) -> Card:
@@ -813,6 +861,7 @@ class SettingsPage(PageWidget):
         self.fallback_model_edit.setText(str(settings.get("fallback_model", "") or ""))
         self.fallback_key_edit.setText(str(settings.get("fallback_api_key", "") or ""))
         self.mica_switch.setChecked(bool(settings.get("mica", True)))
+        self.update_auto_switch.setChecked(bool(settings.get("update_check_on_start", True)))
         self._select_data(self.language_combo, settings.get("i18n_lang", i18n.DEFAULT_LANG))
         self.sync_url_edit.setText(str(settings.get("sync_url", "") or ""))
         self.sync_user_edit.setText(str(settings.get("sync_user", "") or ""))
@@ -961,29 +1010,199 @@ class SettingsPage(PageWidget):
             parent=self,
         )
 
-    def _check_update(self) -> None:
-        from ..core.updater import Updater  # 延迟导入：只有点按钮才需要
-
-        if self._updater is None:
-            self._updater = Updater(
-                channel=str(settings.get("update_channel", "stable") or "stable")
-            )
-        self.update_state.setText("正在检查…")
-        self.update_check_button.setEnabled(False)
-        try:
-            status = self._updater.check()
-        finally:
-            self.update_check_button.setEnabled(True)
-        self.update_state.setText(status.message)
-        if status.available and status.release is not None:
-            self.update_state.setToolTip(status.release.notes[:800])
-        (InfoBar.success if status.ok else InfoBar.error)(
-            title="发现新版本" if status.available else "检查完成",
-            content=status.message,
+    def _toast(self, kind, title: str, content: str) -> None:
+        """统一的小提示：不抢焦点、几秒后自动消失。"""
+        kind(
+            title=title,
+            content=content,
             duration=4000,
             position=InfoBarPosition.TOP_RIGHT,
             parent=self,
         )
+
+    def _check_update(self) -> None:
+        from ..ui.update_worker import UpdateCheckWorker  # 延迟导入：只有点按钮才需要
+
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        self.update_state.setText("正在检查…")
+        self.update_check_button.setEnabled(False)
+        worker = UpdateCheckWorker(
+            channel=str(settings.get("update_channel", "stable") or "stable")
+        )
+        worker.checked.connect(self._on_update_checked)
+        worker.failed.connect(self._on_update_failed)
+        worker.finished.connect(self._on_update_check_finished)
+        self._update_worker = worker
+        worker.start()
+
+    def _on_update_check_finished(self) -> None:
+        worker = self._update_worker
+        self._update_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.update_check_button.setEnabled(True)
+
+    def _on_update_checked(self, status) -> None:
+        self.update_state.setText(status.message)
+        self._last_status = status
+        if not status.ok:
+            self._toast(InfoBar.error, "检查失败", status.message)
+            return
+        release = getattr(status, "release", None)
+        if status.available and release is not None:
+            self.update_state.setToolTip(str(getattr(release, "notes", ""))[:800])
+            self._toast(InfoBar.success, "发现新版本", status.message)
+            self._offer_update(release)
+            return
+        self._toast(InfoBar.success, "已是最新", status.message)
+
+    def _on_update_failed(self, message: str) -> None:
+        self.update_state.setText(message)
+        self._toast(InfoBar.error, "检查更新失败", message)
+
+    def _offer_update(self, release) -> None:
+        """发现新版本 → 问一次，愿意就后台下载。"""
+        from ..ui.update_worker import install_kind, pick_asset
+        from qfluentwidgets import MessageBox
+
+        kind = install_kind()
+        asset = pick_asset(release, kind)
+        if kind == "source":
+            box = MessageBox(
+                "发现新版本 {0}".format(release.version),
+                "{0}\n\n源码运行模式不能自我替换，请到发布页下载新版。".format(
+                    str(getattr(release, "notes", "") or "")[:600]
+                ),
+                self,
+            )
+            box.yesButton.setText("去发布页")
+            box.cancelButton.setText("知道了")
+            if box.exec():
+                self._open_releases_page()
+            return
+        if asset is None:
+            self._toast(InfoBar.warning, "缺少安装包", "这个版本没有可下载的 zip / exe。")
+            return
+
+        size = asset.size / 1048576 if getattr(asset, "size", 0) else 0
+        box = MessageBox(
+            "发现新版本 {0}".format(release.version),
+            "{0}\n\n当前版本 {1} → 新版本 {2}\n下载 {3}（{4:.1f} MB），"
+            "下载完成后会询问是否立即重启安装。".format(
+                str(getattr(release, "notes", "") or "")[:600],
+                VERSION,
+                release.version,
+                asset.name,
+                size,
+            ),
+            self,
+        )
+        box.yesButton.setText("立即下载并更新")
+        box.cancelButton.setText("稍后")
+        if not box.exec():
+            return
+        self._start_update_download(release, asset)
+
+    def _start_update_download(self, release, asset) -> None:
+        from ..ui.update_worker import UpdateDownloadWorker
+
+        if self._download_worker is not None and self._download_worker.isRunning():
+            return
+        self.update_progress.setVisible(True)
+        self.update_progress.setValue(0)
+        self.update_check_button.setEnabled(False)
+        self.update_state.setText("正在下载 {0}…".format(asset.name))
+        worker = UpdateDownloadWorker(release, asset=asset)
+        worker.progressed.connect(self._on_update_progress)
+        worker.ready.connect(self._on_update_ready)
+        worker.failed.connect(self._on_update_download_failed)
+        worker.finished.connect(self._on_update_download_finished)
+        self._download_worker = worker
+        worker.start()
+
+    def _on_update_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            self.update_progress.setValue(int(done * 100 / total))
+            self.update_state.setText(
+                "正在下载… {0:.1f} / {1:.1f} MB".format(done / 1048576, total / 1048576)
+            )
+        else:
+            self.update_state.setText("正在下载… {0:.1f} MB".format(done / 1048576))
+
+    def _on_update_download_finished(self) -> None:
+        worker = self._download_worker
+        self._download_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.update_check_button.setEnabled(True)
+
+    def _on_update_download_failed(self, message: str) -> None:
+        self.update_progress.setVisible(False)
+        self.update_state.setText(message)
+        self._toast(InfoBar.error, "下载更新失败", message)
+
+    def _on_update_ready(self, path, release) -> None:
+        from qfluentwidgets import MessageBox
+
+        self.update_progress.setValue(100)
+        self.update_state.setText("更新包已就绪：{0}".format(Path(path).name))
+        box = MessageBox(
+            "更新已下载",
+            "{0} 已下载并校验通过。\n\n立即重启完成安装？"
+            "（会关闭当前窗口，替换文件后自动重新打开）".format(release.version),
+            self,
+        )
+        box.yesButton.setText("立即重启安装")
+        box.cancelButton.setText("稍后")
+        if box.exec():
+            self._apply_update(path)
+        else:
+            self._toast(
+                InfoBar.info,
+                "稍后安装",
+                "更新包已保存，下次可以再点「检查更新」安装。",
+            )
+
+    def _apply_update(self, path) -> None:
+        from PyQt6.QtWidgets import QApplication
+
+        from ..ui.update_worker import build_apply_script, install_kind
+        from ..core.updater import Updater
+
+        # 源码运行时 sys.executable 是 python.exe，真按下去会把解释器目录当程序目录替换。
+        if install_kind() == "source":
+            self.update_state.setText("源码模式不自动替换：请从发布页下载新版，或直接 git pull。")
+            self._toast(
+                InfoBar.warning,
+                "源码模式不自动替换",
+                "请到发布页下载新版，或直接 git pull。",
+            )
+            return
+
+        try:
+            script = build_apply_script(Path(path))
+            Updater.launch_script(script)
+        except Exception as exc:  # noqa: BLE001
+            self._toast(InfoBar.error, "无法启动更新脚本", str(exc))
+            return
+
+        # 先把托盘、代理、扩展收掉，再退出；批处理会等本进程消失才开始覆盖。
+        window = self.window()
+        shutdown = getattr(window, "_shutdown", None)
+        if callable(shutdown):
+            try:
+                shutdown()
+            except Exception:  # noqa: BLE001
+                pass
+        QApplication.instance().quit()
+
+    def _auto_check_update(self) -> None:
+        if not bool(settings.get("update_check_on_start", True)):
+            return
+        if not getattr(sys, "frozen", False):
+            return
+        self._check_update()
 
     def _on_port_changed(self, value: int) -> None:
         self._save("proxy_port", int(value))
