@@ -16,7 +16,7 @@ from typing import Any
 APP_NAME = "IndexTranslate desktop"
 APP_PROJECT = "IndexTranslate-desktop"
 APP_SLUG = "IndexTranslate"
-VERSION = "1.2.0"
+VERSION = "2.0.0"
 
 API_BASE = "https://index-translate.bilibili.com/v1"
 SERVICE_HOME = "https://index-translate.bilibili.com/site/home.html"
@@ -106,6 +106,14 @@ DEFAULTS: dict[str, Any] = {
     "fallback_api_base": "",     # 自定义备用端点（Ollama / 硅基流动 …）
     "fallback_model": "",
     "fallback_api_key": "",
+    # V2 底座：统一管道的限流 / 缓存 / 模型降级（主界面、浮窗、批量共用）
+    "fallback_enabled": True,
+    "fallback_models": ["Index-Translate-9B", "Index-Translate-2B"],
+    "cache_enabled": True,
+    "cache_ttl_days": 7,
+    "cache_max_rows": 10000,
+    "rate_max_concurrency": 3,
+    "rate_min_interval": 0.25,   # 两次请求之间的最小间隔（秒），0 = 不限
     "advanced_open": False,
     "minimize_to_tray": True,   # 关闭窗口时收进托盘而不是退出
     "autostart": False,         # 开机静默启动（写 HKCU Run 项）
@@ -113,7 +121,16 @@ DEFAULTS: dict[str, Any] = {
     "tray_tip_shown": False,    # 只提示一次「程序还在托盘里运行」
     "popup_enabled": True,      # 全局划词浮窗
     "popup_hotkey": "Ctrl+Alt+T",
+    "popup_pinned": False,      # 浮窗图钉：锁定后点击外部不关闭
     "shot_hotkey": "Ctrl+Alt+S",  # 框选截屏翻译
+    "capture_target": "main",   # 截屏结果给谁看：main（主窗口）| popup（浮窗）
+    "replace_enabled": True,    # 输入框原地替换
+    "replace_hotkey": "Ctrl+Alt+R",
+    "replace_model": "Index-Translate-2B",  # 原地替换优先用极速模型
+    "replace_select_all": True,  # 没有选区时先 Ctrl+A 全选
+    "selection_blacklist": [],   # 这些前台进程里不模拟 Ctrl+C
+    "single_instance": True,     # 只允许开一个实例
+    "silent_autostart": True,    # 开机自启时静默进托盘（--minimized / --silent）
     "always_on_top": False,     # 窗口置顶
     "clipboard_watch": False,   # 剪贴板实时监听
     # 风格预设（空列表 = 使用 app/core/styles.py 里的内置预设）
@@ -128,6 +145,30 @@ DEFAULTS: dict[str, Any] = {
     "batch_concurrency": 1,
     "batch_export": "bilingual",   # bilingual | target | both
     "batch_last_dir": "",
+    # 扩展（Sidecar 重型能力，按需下载，不进主安装包）
+    "extension_idle_sec": 300,     # 空闲多久回收扩展进程（秒）
+    "extension_catalog": "",       # 扩展目录 URL（留空 = 只用本地 zip 安装）
+    "ocr_overlay_enabled": True,   # 截屏翻译优先走本地 OCR 贴片
+    "ocr_overlay_font_scale": 1.0,  # 贴片字号缩放
+    "live_asr_model": "",          # sherpa-onnx 模型目录
+    "live_subtitle_enabled": False,
+    "live_subtitle_geometry": "",  # 悬浮字幕条位置
+    # 多端同步（WebDAV）
+    "sync_enabled": False,
+    "sync_url": "",
+    "sync_user": "",
+    "sync_password": "",           # DPAPI 加密后的密文，见 app/core/sync/webdav_sync.py
+    "sync_auto": False,
+    "sync_last_at": 0.0,
+    "sync_last_result": "",
+    # 自动更新
+    "update_channel": "stable",
+    "update_checked_at": 0.0,
+    "update_skip_version": "",
+    # 外观 / 语言
+    "mica": True,                  # Win11 会被系统忽略，Win10 自动回退纯色
+    "i18n_lang": "zh_CN",          # zh_CN | zh_TW | en_US
+    "mini_mode": False,            # 迷你悬浮条形态
     "window_geometry": "",
     "window_state": "",
 }
@@ -172,6 +213,10 @@ class Settings:
         for key, value in kwargs.items():
             if key in DEFAULTS:
                 self._data[key] = value
+
+    def values(self) -> dict[str, Any]:
+        """A shallow copy of every stored value (used by the sync snapshot)."""
+        return dict(self._data)
 
 
 settings = Settings()

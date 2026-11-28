@@ -31,12 +31,13 @@ from qfluentwidgets import (
     setTheme,
 )
 
-from ..core import settings
+from ..core import i18n, settings
 from ..core.autostart import AutostartError, is_enabled as autostart_enabled
 from ..core.autostart import set_enabled as set_autostart
 from ..core.config import API_BASE, APP_PROJECT, MODELS, SERVICE_HOME, VERSION, data_dir
 from ..core.proxy_manager import ProxyManager
-from .theme import Card, MutedLabel, PageWidget, TextLabel
+from ..core.sync.webdav_sync import SyncService
+from .theme import Card, Divider, MutedLabel, PageWidget, TextLabel
 
 THEMES = [("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
 
@@ -50,11 +51,22 @@ class SettingsPage(PageWidget):
     settingsChanged = pyqtSignal()
     hotkeyChanged = pyqtSignal(str)
     shotHotkeyChanged = pyqtSignal(str)
+    replaceHotkeyChanged = pyqtSignal(str)
+    micaChanged = pyqtSignal(bool)
+    languageChanged = pyqtSignal(str)
 
-    def __init__(self, proxy_manager: ProxyManager, parent=None) -> None:
+    def __init__(
+        self,
+        proxy_manager: ProxyManager,
+        sync_service: SyncService | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         # 代理的所有权在 MainWindow，设置页只驱动它并展示状态。
         self._proxy_manager = proxy_manager
+        self._sync_service = sync_service
+        self._updater = None
+        self._busy_sync = False
         self._build_ui()
         self._sync_from_settings()
         self._proxy_manager.started.connect(self._on_proxy_started)
@@ -83,7 +95,9 @@ class SettingsPage(PageWidget):
 
         layout.addWidget(self._build_service_card())
         layout.addWidget(self._build_behaviour_card())
+        layout.addWidget(self._build_core_card())
         layout.addWidget(self._build_appearance_card())
+        layout.addWidget(self._build_sync_card())
         layout.addWidget(self._build_system_card())
         layout.addWidget(self._build_proxy_card())
         layout.addWidget(self._build_proxy_optimize_card())
@@ -185,6 +199,66 @@ class SettingsPage(PageWidget):
         self.instruction_edit.editingFinished.connect(self._save_instruction)
         return card
 
+    def _build_core_card(self) -> Card:
+        """翻译底座的用户可调项：缓存 / 限流 / 自动降级。"""
+        card, body = self._card("翻译底座")
+        intro = MutedLabel(
+            "主窗口、划词浮窗、框选截屏和批量队列共用同一条管道："
+            "同样的原文第二次出现会直接命中缓存，限流保证不会把免费接口打爆，"
+            "遇到 429 会自动换更小的模型。",
+            size=11,
+        )
+        intro.setWordWrap(True)
+        body.addWidget(intro)
+
+        self.core_cache_switch = SwitchButton()
+        self._row(body, "结果缓存", "相同原文与参数直接复用译文，不占网络", self.core_cache_switch)
+
+        self.core_ttl_spin = SpinBox()
+        self.core_ttl_spin.setRange(1, 90)
+        self.core_ttl_spin.setSuffix(" 天")
+        self.core_ttl_spin.setMinimumWidth(160)
+        self._row(body, "缓存有效期", "过期后重新请求；命中的条目会刷新时间", self.core_ttl_spin)
+
+        self.core_fallback_switch = SwitchButton()
+        self._row(
+            body,
+            "自动降级",
+            "超时 / 429 / 5xx 时依次尝试 9B、2B；已经流出译文则不再改模型",
+            self.core_fallback_switch,
+        )
+
+        self.core_conc_spin = SpinBox()
+        self.core_conc_spin.setRange(1, 8)
+        self.core_conc_spin.setSuffix(" 个")
+        self.core_conc_spin.setMinimumWidth(160)
+        self._row(body, "并发上限", "同时进行的请求数，批量任务也受它约束", self.core_conc_spin)
+
+        self.core_gap_spin = DoubleSpinBox()
+        self.core_gap_spin.setRange(0.0, 3.0)
+        self.core_gap_spin.setSingleStep(0.05)
+        self.core_gap_spin.setDecimals(2)
+        self.core_gap_spin.setSuffix(" 秒")
+        self.core_gap_spin.setMinimumWidth(160)
+        self._row(body, "请求最小间隔", "两次请求之间至少隔这么久，0 表示不限", self.core_gap_spin)
+
+        self.core_cache_switch.checkedChanged.connect(
+            lambda value: self._save("cache_enabled", bool(value))
+        )
+        self.core_ttl_spin.valueChanged.connect(
+            lambda value: self._save("cache_ttl_days", int(value))
+        )
+        self.core_fallback_switch.checkedChanged.connect(
+            lambda value: self._save("fallback_enabled", bool(value))
+        )
+        self.core_conc_spin.valueChanged.connect(
+            lambda value: self._save("rate_max_concurrency", int(value))
+        )
+        self.core_gap_spin.valueChanged.connect(
+            lambda value: self._save("rate_min_interval", round(float(value), 2))
+        )
+        return card
+
     def _build_appearance_card(self) -> Card:
         card, body = self._card("外观")
         self.theme_combo = ComboBox()
@@ -193,6 +267,103 @@ class SettingsPage(PageWidget):
             self.theme_combo.addItem(label, userData=value)
         self._row(body, "主题", "跟随系统时会随 Windows 深浅色切换", self.theme_combo)
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+
+        self.mica_switch = SwitchButton()
+        self.mica_switch.setOnText("开")
+        self.mica_switch.setOffText("关")
+        self.mica_switch.setMinimumWidth(220)
+        self._row(
+            body,
+            "云母背景（Mica）",
+            "Windows 11 上给窗口加半透明材质；Windows 10 会自动忽略",
+            self.mica_switch,
+        )
+        self.mica_switch.checkedChanged.connect(self._on_mica_toggled)
+
+        self.language_combo = ComboBox()
+        self.language_combo.setMinimumWidth(220)
+        for code, label in i18n.available():
+            self.language_combo.addItem(label, userData=code)
+        self._row(
+            body,
+            "界面语言",
+            "只影响导航与主要按钮文案，错误提示保持中文",
+            self.language_combo,
+        )
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        return card
+
+    def _build_sync_card(self) -> Card:
+        card, body = self._card("同步与更新")
+        body.addWidget(
+            MutedLabel(
+                "只同步术语、风格预设与偏好；译文缓存和批量任务留在本机，避免把绝对路径带到另一台电脑。",
+                size=11,
+            )
+        )
+
+        self.sync_url_edit = LineEdit()
+        self.sync_url_edit.setPlaceholderText("https://dav.jianguoyun.com/dav/IndexTranslate")
+        self.sync_url_edit.setMinimumWidth(320)
+        self.sync_url_edit.editingFinished.connect(self._save_sync)
+        self._row(body, "WebDAV 地址", "坚果云 / Nextcloud / Alist 的目录地址", self.sync_url_edit)
+
+        self.sync_user_edit = LineEdit()
+        self.sync_user_edit.setPlaceholderText("账号 / 邮箱")
+        self.sync_user_edit.setMinimumWidth(320)
+        self.sync_user_edit.editingFinished.connect(self._save_sync)
+        self._row(body, "账号", "", self.sync_user_edit)
+
+        self.sync_password_edit = PasswordLineEdit()
+        self.sync_password_edit.setPlaceholderText("留空表示不修改已保存的密码")
+        self.sync_password_edit.setMinimumWidth(320)
+        self.sync_password_edit.editingFinished.connect(self._save_sync)
+        self._row(
+            body,
+            "密码 / 应用密码",
+            "用 Windows DPAPI 加密保存，只在当前账户可解密",
+            self.sync_password_edit,
+        )
+
+        self.sync_auto_switch = SwitchButton()
+        self.sync_auto_switch.setOnText("开")
+        self.sync_auto_switch.setOffText("关")
+        self.sync_auto_switch.setMinimumWidth(220)
+        self._row(body, "启动时自动同步", "启动后台拉取一次并回推本地改动", self.sync_auto_switch)
+        self.sync_auto_switch.checkedChanged.connect(
+            lambda checked: self._save("sync_auto", bool(checked))
+        )
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.sync_test_button = PushButton("测试连接")
+        self.sync_now_button = PrimaryPushButton("立即同步")
+        self.sync_test_button.setFixedHeight(34)
+        self.sync_now_button.setFixedHeight(34)
+        self.sync_test_button.clicked.connect(self._test_sync)
+        self.sync_now_button.clicked.connect(self._sync_now)
+        self.sync_state = MutedLabel("尚未同步", size=11)
+        actions.addWidget(self.sync_test_button)
+        actions.addWidget(self.sync_now_button)
+        actions.addWidget(self.sync_state, 1)
+        body.addLayout(actions)
+
+        self._sync_card_divider = Divider()
+        body.addWidget(self._sync_card_divider)
+
+        update_row = QHBoxLayout()
+        update_row.setSpacing(8)
+        update_row.addWidget(_title_label("当前版本"))
+        self.update_version_label = MutedLabel(VERSION, size=12)
+        update_row.addWidget(self.update_version_label)
+        update_row.addStretch(1)
+        self.update_check_button = PushButton("检查更新")
+        self.update_check_button.setFixedHeight(34)
+        self.update_check_button.clicked.connect(self._check_update)
+        update_row.addWidget(self.update_check_button)
+        body.addLayout(update_row)
+        self.update_state = MutedLabel("", size=11)
+        body.addWidget(self.update_state)
         return card
 
     def _build_system_card(self) -> Card:
@@ -284,7 +455,77 @@ class SettingsPage(PageWidget):
 
         self.shot_hotkey_apply.clicked.connect(self._apply_shot_hotkey)
         self.shot_hotkey_edit.returnPressed.connect(self._apply_shot_hotkey)
+
+        self.capture_target_combo = ComboBox()
+        self.capture_target_combo.addItem("主窗口", userData="main")
+        self.capture_target_combo.addItem("浮窗（不切窗口）", userData="popup")
+        self.capture_target_combo.setMinimumWidth(220)
+        self._row(
+            body,
+            "截屏结果显示",
+            "选「浮窗」后框选完直接在鼠标旁出译文，主窗口不会被拉到前面",
+            self.capture_target_combo,
+        )
+        self.capture_target_combo.currentIndexChanged.connect(
+            lambda _: self._save("capture_target", self.capture_target_combo.currentData() or "main")
+        )
+
+        self.replace_switch = SwitchButton()
+        self._row(
+            body,
+            "输入框原地替换",
+            "取选区（没有选区就全选）→ 翻译 → 把译文粘回原位置，剪贴板不受影响",
+            self.replace_switch,
+        )
+
+        replace_row = QHBoxLayout()
+        replace_row.setSpacing(8)
+        self.replace_hotkey_edit = LineEdit()
+        self.replace_hotkey_edit.setPlaceholderText("例如 Ctrl+Alt+R")
+        self.replace_hotkey_edit.setClearButtonEnabled(True)
+        self.replace_hotkey_edit.setFixedHeight(34)
+        self.replace_hotkey_apply = PushButton("应用快捷键")
+        self.replace_hotkey_apply.setMinimumWidth(112)
+        self.replace_hotkey_apply.setFixedHeight(34)
+        replace_row.addWidget(_title_label("替换快捷键"))
+        replace_row.addWidget(self.replace_hotkey_edit, 1)
+        replace_row.addWidget(self.replace_hotkey_apply)
+        body.addLayout(replace_row)
+
+        self.replace_hotkey_state = MutedLabel("", size=11)
+        body.addWidget(self.replace_hotkey_state)
+
+        self.replace_switch.checkedChanged.connect(self._on_replace_toggled)
+        self.replace_hotkey_apply.clicked.connect(self._apply_replace_hotkey)
+        self.replace_hotkey_edit.returnPressed.connect(self._apply_replace_hotkey)
         return card
+
+    def _on_replace_toggled(self, checked: bool) -> None:
+        self._save("replace_enabled", bool(checked))
+        self.replaceHotkeyChanged.emit(
+            str(settings.get("replace_hotkey", "")) if checked else ""
+        )
+
+    def _apply_replace_hotkey(self) -> None:
+        sequence = self.replace_hotkey_edit.text().strip()
+        if not sequence:
+            InfoBar.warning(
+                title="快捷键不能为空",
+                content="例如 Ctrl+Alt+R。",
+                duration=3000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+            return
+        self._save("replace_hotkey", sequence)
+        self.replaceHotkeyChanged.emit(sequence)
+
+    def report_replace_hotkey(self, ok: bool, detail: str) -> None:
+        if ok:
+            self.replace_hotkey_edit.setText(detail)
+            self.replace_hotkey_state.setText(f"已生效：{detail}")
+        else:
+            self.replace_hotkey_state.setText(detail)
 
     def _on_popup_toggled(self, checked: bool) -> None:
         self._save("popup_enabled", bool(checked))
@@ -512,6 +753,11 @@ class SettingsPage(PageWidget):
         self.glossary_switch.setChecked(bool(settings.get("use_glossary", True)))
         self.keep_spin.setValue(int(settings.get("keep_history", 500) or 0))
         self.instruction_edit.setText(str(settings.get("instruction", "") or ""))
+        self.core_cache_switch.setChecked(bool(settings.get("cache_enabled", True)))
+        self.core_ttl_spin.setValue(int(settings.get("cache_ttl_days", 7) or 7))
+        self.core_fallback_switch.setChecked(bool(settings.get("fallback_enabled", True)))
+        self.core_conc_spin.setValue(int(settings.get("rate_max_concurrency", 3) or 3))
+        self.core_gap_spin.setValue(float(settings.get("rate_min_interval", 0.25) or 0.0))
         self._select_data(self.theme_combo, settings.get("theme", "auto"))
         self.port_spin.setValue(int(settings.get("proxy_port", 8080) or 8080))
         self.tray_switch.setChecked(bool(settings.get("minimize_to_tray", True)))
@@ -520,6 +766,9 @@ class SettingsPage(PageWidget):
         self.popup_switch.setChecked(bool(settings.get("popup_enabled", True)))
         self.hotkey_edit.setText(str(settings.get("popup_hotkey", "Ctrl+Alt+T") or ""))
         self.shot_hotkey_edit.setText(str(settings.get("shot_hotkey", "Ctrl+Alt+S") or ""))
+        self._select_data(self.capture_target_combo, settings.get("capture_target", "main"))
+        self.replace_switch.setChecked(bool(settings.get("replace_enabled", True)))
+        self.replace_hotkey_edit.setText(str(settings.get("replace_hotkey", "Ctrl+Alt+R") or ""))
         self.concurrency_spin.setValue(int(settings.get("proxy_max_concurrency", 4) or 1))
         self.qps_spin.setValue(float(settings.get("proxy_qps", 3.0) or 0.0))
         cache_on = bool(settings.get("proxy_cache", True))
@@ -532,6 +781,17 @@ class SettingsPage(PageWidget):
         self.fallback_base_edit.setText(str(settings.get("fallback_api_base", "") or ""))
         self.fallback_model_edit.setText(str(settings.get("fallback_model", "") or ""))
         self.fallback_key_edit.setText(str(settings.get("fallback_api_key", "") or ""))
+        self.mica_switch.setChecked(bool(settings.get("mica", True)))
+        self._select_data(self.language_combo, settings.get("i18n_lang", i18n.DEFAULT_LANG))
+        self.sync_url_edit.setText(str(settings.get("sync_url", "") or ""))
+        self.sync_user_edit.setText(str(settings.get("sync_user", "") or ""))
+        stored = str(settings.get("sync_password", "") or "")
+        self.sync_password_edit.setPlaceholderText(
+            "已保存（留空表示不修改）" if stored else "未设置"
+        )
+        self.sync_auto_switch.setChecked(bool(settings.get("sync_auto", False)))
+        last = str(settings.get("sync_last_result", "") or "")
+        self.sync_state.setText(last or "尚未同步")
         self.sync_proxy_state()
 
     @staticmethod
@@ -589,6 +849,110 @@ class SettingsPage(PageWidget):
         mapping = {"auto": Theme.AUTO, "light": Theme.LIGHT, "dark": Theme.DARK}
         setTheme(mapping.get(value, Theme.AUTO), save=True)
         self.themeChanged.emit(value)
+
+    def _on_mica_toggled(self, checked: bool) -> None:
+        self._save("mica", bool(checked))
+        self.micaChanged.emit(bool(checked))
+
+    def _on_language_changed(self) -> None:
+        code = self.language_combo.currentData() or i18n.DEFAULT_LANG
+        self._save("i18n_lang", str(code))
+        i18n.load(str(code))
+        self.languageChanged.emit(str(code))
+
+    # ------------------------------------------------------------ sync / update
+    def _save_sync(self) -> None:
+        url = self.sync_url_edit.text().strip()
+        user = self.sync_user_edit.text().strip()
+        changed = url != str(settings.get("sync_url", "")) or user != str(
+            settings.get("sync_user", "")
+        )
+        settings.set("sync_url", url)
+        settings.set("sync_user", user)
+        settings.set("sync_enabled", bool(url))
+        password = self.sync_password_edit.text()
+        if password:
+            if self._sync_service is not None:
+                try:
+                    self._sync_service.set_password(password)
+                except Exception as exc:  # noqa: BLE001 - 加密失败要说清原因
+                    InfoBar.error(
+                        title="密码保存失败",
+                        content=str(exc),
+                        duration=3000,
+                        position=InfoBarPosition.TOP_RIGHT,
+                        parent=self,
+                    )
+            self.sync_password_edit.clear()
+        if changed:
+            self.settingsChanged.emit()
+        settings.save()
+
+    def _test_sync(self) -> None:
+        if self._sync_service is None:
+            self.sync_state.setText("同步服务未初始化")
+            return
+        self._save_sync()
+        ok, message = self._sync_service.test()
+        self.sync_state.setText(message)
+        (InfoBar.success if ok else InfoBar.error)(
+            title="连接正常" if ok else "连接失败",
+            content=message,
+            duration=3000,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )
+
+    def _sync_now(self) -> None:
+        if self._sync_service is None or self._busy_sync:
+            return
+        self._save_sync()
+        if not str(settings.get("sync_url", "")).strip():
+            self.sync_state.setText("请先填写 WebDAV 地址")
+            return
+        self._busy_sync = True
+        self.sync_now_button.setEnabled(False)
+        self.sync_state.setText("正在同步…")
+        try:
+            result = self._sync_service.sync_now()
+        finally:
+            self._busy_sync = False
+            self.sync_now_button.setEnabled(True)
+        text = result.message or ("同步完成" if result.ok else "同步失败")
+        if result.ok and (result.pushed or result.pulled):
+            text = f"{text}（拉取 {result.pulled} 条，推送 {result.pushed} 条）"
+        self.sync_state.setText(text)
+        (InfoBar.success if result.ok else InfoBar.error)(
+            title="同步完成" if result.ok else "同步失败",
+            content=text,
+            duration=4000,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )
+
+    def _check_update(self) -> None:
+        from ..core.updater import Updater  # 延迟导入：只有点按钮才需要
+
+        if self._updater is None:
+            self._updater = Updater(
+                channel=str(settings.get("update_channel", "stable") or "stable")
+            )
+        self.update_state.setText("正在检查…")
+        self.update_check_button.setEnabled(False)
+        try:
+            status = self._updater.check()
+        finally:
+            self.update_check_button.setEnabled(True)
+        self.update_state.setText(status.message)
+        if status.available and status.release is not None:
+            self.update_state.setToolTip(status.release.notes[:800])
+        (InfoBar.success if status.ok else InfoBar.error)(
+            title="发现新版本" if status.available else "检查完成",
+            content=status.message,
+            duration=4000,
+            position=InfoBarPosition.TOP_RIGHT,
+            parent=self,
+        )
 
     def _on_port_changed(self, value: int) -> None:
         self._save("proxy_port", int(value))
@@ -769,3 +1133,8 @@ class SettingsPage(PageWidget):
         # 代理由 MainWindow 持有并在退出时统一停止，这里只重置展示状态。
         self.proxy_url_edit.clear()
         self.proxy_copy_button.setEnabled(False)
+        if self._sync_service is not None:
+            try:
+                self._sync_service.close()
+            except Exception:  # noqa: BLE001 - 退出路径不该再抛
+                pass

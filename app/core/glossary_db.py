@@ -14,6 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .models import ALL_GROUPS
+from .term_match import term_hits
+
 DEFAULT_GROUP = "默认"
 SCHEMA_VERSION = 2
 
@@ -290,18 +293,31 @@ class GlossaryDB:
         )
 
     # -------------------------------------------------------------- injection
-    def match_pairs(self, text: str, *, max_terms: int = MAX_INJECT_TERMS) -> list[tuple[str, str]]:
-        """只保留原文里真的出现过的术语，长词优先（API 网关 胜过 API）。"""
-        folded = (text or "").casefold()
-        if not folded:
+    def match_terms(
+        self,
+        text: str,
+        group_name: str | None = ALL_GROUPS,
+        *,
+        max_terms: int = MAX_INJECT_TERMS,
+    ) -> list[tuple[str, str]]:
+        """术语命中：只返回原文里真的出现过的词条，长词优先。
+
+        ``group_name`` 语义：``"*"`` = 所有已启用分组；``None`` = 不注入；
+        具体分组名 = 只查该分组（该分组被停用时返回空）。
+        """
+        if group_name is None:
             return []
-        hits = [
-            (term, translation)
-            for term, translation in self.all_enabled()
-            if translation and term.casefold() in folded
-        ]
-        hits.sort(key=lambda pair: (-len(pair[0]), pair[0]))
-        return hits[:max_terms]
+        if group_name == ALL_GROUPS:
+            pairs = self.all_enabled()
+        else:
+            if group_name not in self.enabled_groups():
+                return []
+            pairs = self.all(group_name)
+        return term_hits(text, pairs, max_terms=max_terms)
+
+    def match_pairs(self, text: str, *, max_terms: int = MAX_INJECT_TERMS) -> list[tuple[str, str]]:
+        """兼容旧接口：等价于 ``match_terms(text, "*")``。"""
+        return self.match_terms(text, ALL_GROUPS, max_terms=max_terms)
 
     def prompt_for(self, text: str, *, max_terms: int = MAX_INJECT_TERMS) -> str:
         """按命中裁剪后的 A→B 列表；没有命中就是空串（不注入）。"""

@@ -51,6 +51,9 @@ class TrayIcon(QSystemTrayIcon):
     proxyToggleRequested = pyqtSignal()
     popupRequested = pyqtSignal()
     screenshotRequested = pyqtSignal()
+    replaceRequested = pyqtSignal()
+    subtitleRequested = pyqtSignal()
+    extensionsRequested = pyqtSignal()
     minimizeToTrayChanged = pyqtSignal(bool)
     autostartChanged = pyqtSignal(bool)
 
@@ -77,6 +80,18 @@ class TrayIcon(QSystemTrayIcon):
         self.shot_action = Action("截屏翻译  Ctrl+Alt+S", parent=self._menu)
         self.shot_action.triggered.connect(self.screenshotRequested.emit)
         self._menu.addAction(self.shot_action)
+
+        self.replace_action = Action("输入框替换  Ctrl+Alt+R", parent=self._menu)
+        self.replace_action.triggered.connect(self.replaceRequested.emit)
+        self._menu.addAction(self.replace_action)
+
+        self.subtitle_action = Action("实时字幕（系统音频）", parent=self._menu, checkable=True)
+        self.subtitle_action.triggered.connect(self.subtitleRequested.emit)
+        self._menu.addAction(self.subtitle_action)
+
+        extensions_action = Action("扩展中心…", parent=self._menu)
+        extensions_action.triggered.connect(self.extensionsRequested.emit)
+        self._menu.addAction(extensions_action)
         self._menu.addSeparator()
 
         self.proxy_action = Action("本地代理：未启动", parent=self._menu)
@@ -111,6 +126,9 @@ class TrayIcon(QSystemTrayIcon):
 
     def set_shot_hotkey(self, sequence: str) -> None:
         self.shot_action.setText(f"截屏翻译  {sequence}" if sequence else "截屏翻译")
+
+    def set_replace_hotkey(self, sequence: str) -> None:
+        self.replace_action.setText(f"输入框替换  {sequence}" if sequence else "输入框替换")
 
     def set_state(
         self,

@@ -11,6 +11,8 @@ import time
 import uuid
 from typing import Any, Iterable, Sequence
 
+from .term_match import term_hits
+
 # Fields that change the answer; everything else (stream flags, user ids …) must
 # NOT be part of the key or the cache would never hit.
 _KEY_FIELDS = (
@@ -70,20 +72,16 @@ def extract_source_text(messages: Any) -> str:
 
 # ------------------------------------------------------------------ glossary
 def match_glossary(text: str, pairs: Iterable[tuple[str, str]]) -> list[str]:
-    """Terms from ``pairs`` that actually occur in ``text``, longest first."""
-    if not text:
-        return []
-    lowered = text.lower()
-    hits: list[str] = []
-    for term, translation in pairs:
-        term = (term or "").strip()
-        if not term or not (translation or "").strip():
-            continue
-        if term.lower() in lowered:
-            hits.append(f"{term}→{translation.strip()}")
-    # Longest terms first so "Transformer 架构" survives next to "Transformer".
-    hits.sort(key=len, reverse=True)
-    return hits[:MAX_GLOSSARY_TERMS]
+    """Terms from ``pairs`` that actually occur in ``text``, longest first.
+
+    Delegates to :func:`app.core.term_match.term_hits` so the proxy and the
+    desktop pipeline agree on what counts as a hit (ASCII terms need word
+    boundaries — ``cat`` must not fire on ``category``).
+    """
+    return [
+        f"{term}→{(translation or '').strip()}"
+        for term, translation in term_hits(text, pairs, max_terms=MAX_GLOSSARY_TERMS)
+    ]
 
 
 def inject_glossary(payload: dict[str, Any], pairs: Sequence[tuple[str, str]]) -> int:

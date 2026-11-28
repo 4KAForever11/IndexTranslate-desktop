@@ -1,17 +1,30 @@
-"""框选截屏：全屏半透明遮罩 + 拖拽选区，截完直接进图片翻译管线。
+"""内置高 DPI 多屏框选截屏。
 
-为什么自己做而不是调用系统截图工具：
-* 系统工具（Snipping Tool / Win+Shift+S）需要先保存或复制，再切回本程序粘贴；
-* 这里选区一松手就拿到 ``QImage``，可以立刻送进 ``image_utils`` 的压缩 + Base64 流程，
-  少两次剪贴板往返，也不会被其他程序覆盖剪贴板。
+多显示器混合缩放（主屏 150% + 副屏 100%）是截屏功能最容易画糊、偏移的地方。
+这里采用「按光标所在屏幕独立铺满遮罩」的做法，而不是硬拼一整张虚拟桌面大图：
 
-已知取舍：只在鼠标所在的那块屏幕上框选（多屏时先移鼠标到目标屏）。
+1. 取光标所在屏幕 → ``screen.grabWindow(0)`` 冻结当前画面，同时记住 ``devicePixelRatio``；
+2. 遮罩几何设为 ``screen.geometry()``，``paintEvent`` 先铺冻结底图再压暗，选区挖空；
+3. 松手时把逻辑选区乘上 ``dpr`` 再裁剪——高分屏裁出来的是物理原生像素，不会糊；
+4. 结果直接进 ``image_utils`` 的压缩 + Base64，不需要经过系统截图工具和剪贴板。
+
+为什么自己做而不是调系统截图（Win+Shift+S）：系统工具要落盘或进剪贴板，再切回本
+程序粘贴；这里松手就拿到 ``QImage``，少两次往返，也不会覆盖用户剪贴板。
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QGuiApplication, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import (
+    QColor,
+    QCursor,
+    QGuiApplication,
+    QImage,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import QWidget
 
 from .theme import ACCENT
@@ -41,9 +54,12 @@ class CaptureOverlay(QWidget):
         self.setMouseTracking(True)
 
     # ------------------------------------------------------------------ 启动
-    def start(self) -> None:
-        """先截屏再显示遮罩，避免把遮罩本身拍进去。"""
-        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+    def start(self, screen=None) -> None:
+        """先截屏再显示遮罩，避免把遮罩本身拍进去。
+
+        ``screen`` 为空时用光标所在屏幕；多屏场景可以先移动鼠标再按热键。
+        """
+        screen = screen or QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         if screen is None:
             self.cancelled.emit()
             return
@@ -61,11 +77,18 @@ class CaptureOverlay(QWidget):
         self.activateWindow()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
 
+    @property
+    def device_pixel_ratio(self) -> float:
+        return float(self._pixmap.devicePixelRatio() or 1.0)
+
     # ------------------------------------------------------------------ 绘制
     def _selection(self) -> QRect:
+        """拖拽出来的选区，按半开区间算（拖 400 px 就是 400 px，不是 401）。"""
         if self._origin is None or self._current is None:
             return QRect()
-        return QRect(self._origin, self._current).normalized()
+        x1, x2 = sorted((self._origin.x(), self._current.x()))
+        y1, y2 = sorted((self._origin.y(), self._current.y()))
+        return QRect(x1, y1, x2 - x1, y2 - y1)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -180,7 +203,7 @@ class CaptureOverlay(QWidget):
 
     # ------------------------------------------------------------------ 收尾
     def _emit(self, selection: QRect) -> None:
-        ratio = self._pixmap.devicePixelRatio() or 1.0
+        ratio = self.device_pixel_ratio
         source = QRect(
             int(round(selection.x() * ratio)),
             int(round(selection.y() * ratio)),
@@ -199,11 +222,11 @@ class CaptureOverlay(QWidget):
         self.cancelled.emit()
 
 
-def capture_region(on_captured, on_cancelled=None) -> CaptureOverlay:
+def capture_region(on_captured, on_cancelled=None, screen=None) -> CaptureOverlay:
     """便捷入口：接好信号并启动遮罩，返回遮罩对象（需自己持有引用）。"""
     overlay = CaptureOverlay()
     overlay.captured.connect(on_captured)
     if on_cancelled is not None:
         overlay.cancelled.connect(on_cancelled)
-    overlay.start()
+    overlay.start(screen)
     return overlay

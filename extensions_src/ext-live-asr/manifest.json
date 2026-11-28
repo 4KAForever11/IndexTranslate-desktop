@@ -1,0 +1,15 @@
+{
+  "id": "ext-live-asr",
+  "name": "系统音频实时字幕",
+  "version": "1.0.0",
+  "entry": "main.py",
+  "host_min": "2.0.0",
+  "description": "WASAPI 回环抓取系统播放的音频，VAD 断句后用 sherpa-onnx 离线识别，流式吐出双语字幕。",
+  "methods": [
+    "ping",
+    "start",
+    "stop"
+  ],
+  "size_hint": "160–260 MB",
+  "model_hint": "需要单独下载 sherpa-onnx SenseVoice 模型目录（model.onnx + tokens.txt）"
+}

@@ -49,7 +49,7 @@ from .theme import (
     colors,
     on_theme_changed,
 )
-from .screenshot import CaptureOverlay
+from .capture_overlay import CaptureOverlay
 from .widgets import (
     IMAGE_SUFFIXES,
     ImageDropArea,
@@ -115,6 +115,7 @@ class TranslatePage(PageWidget):
         self._image_qimage: QImage | None = None
         self._thumbnail: bytes | None = None
         self._started_at = 0.0
+        self._notice = ""
         self._default_instruction = ""
         self._overlay = None
         self._last_clip_text = ""
@@ -772,17 +773,12 @@ class TranslatePage(PageWidget):
                 )
                 return
 
-        glossary = ""
-        if settings.get("use_glossary", True):
-            # 只注入原文里真的出现过的术语；图片翻译没有原文时退回全部启用分组
-            glossary = self.glossary_db.prompt_for(text) if text else self.glossary_db.prompt_string()
-
+        # 术语注入、缓存、限流、降级都由底座管道统一处理，这里不再预拼提示词。
         request = TranslationRequest(
             text=text,
             target_lang=self.tgt_combo.currentData() or "zh",
             source_lang=self.src_combo.currentData() or "auto",
             instruction=self.instruction_edit.text().strip(),
-            glossary=glossary,
             model=self.model_combo.currentData() or settings.get("model", DEFAULT_MODEL),
             api_base=settings.get("api_base", ""),
             timeout=float(settings.get("timeout", 120) or 120),
@@ -797,6 +793,7 @@ class TranslatePage(PageWidget):
         self.output.clear()
         self.copy_button.setEnabled(False)
         self.elapsed_label.setText("")
+        self._notice = ""
         self.result_hint.setText(_lang_label(self.tgt_combo))
         self._set_status("正在翻译…", colors()["accent"])
         self._set_running(True)
@@ -805,6 +802,7 @@ class TranslatePage(PageWidget):
         worker = TranslationWorker(request, self)
         worker.delta.connect(self._on_delta)
         worker.stage.connect(lambda message: self._set_status(message, colors()["accent"]))
+        worker.notice.connect(self._on_notice)
         worker.first_token.connect(self._on_first_token)
         worker.thumbnail_ready.connect(self._on_thumbnail)
         worker.done.connect(self._on_done)
@@ -835,6 +833,11 @@ class TranslatePage(PageWidget):
     def _on_first_token(self) -> None:
         self._set_status("正在接收译文…", colors()["accent"])
 
+    def _on_notice(self, text: str) -> None:
+        """管道说点什么（缓存命中 / 已降级）——显示在状态行，最后并入耗时。"""
+        self._notice = text
+        self._set_status(text, colors()["accent"])
+
     def _on_thumbnail(self, thumbnail: object) -> None:
         if isinstance(thumbnail, (bytes, bytearray)):
             self._thumbnail = bytes(thumbnail)
@@ -843,7 +846,8 @@ class TranslatePage(PageWidget):
         self._set_running(False)
         self._set_status("翻译完成", colors()["ok"])
         self.copy_button.setEnabled(bool(text.strip()))
-        self.elapsed_label.setText(f"耗时 {elapsed_ms / 1000:.1f}s")
+        suffix = f" · {self._notice}" if self._notice else ""
+        self.elapsed_label.setText(f"耗时 {elapsed_ms / 1000:.1f}s{suffix}")
 
         entry_id = self.history_db.add(
             kind="image" if self.has_image else "text",

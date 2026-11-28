@@ -3,6 +3,12 @@
 The UI thread must never block on the network, so one worker per request is
 started as a ``QThread``. Streaming deltas are batched (~50 ms) before being
 emitted: a token-by-token signal storm makes the text view stutter.
+
+Since the V2 refactor the worker is a thin shell around
+:func:`app.core.pipeline.get_pipeline` — the pipeline owns the glossary match,
+the cache, the rate limiter and the 35B → 9B → 2B fallback. The worker only
+prepares the image, forwards chunks, and reports what the pipeline decided
+(缓存命中 / 已自动降级).
 """
 
 from __future__ import annotations
@@ -14,8 +20,8 @@ from typing import Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from ..core.api_client import ApiError, ResponseHandle, translate
-from ..core.config import settings
+from ..core.config import DEFAULT_MODEL, model_label, settings
+from ..core.http_client import ResponseHandle
 from ..core.image_utils import (
     fetch_remote_image,
     make_thumbnail,
@@ -24,6 +30,8 @@ from ..core.image_utils import (
     prepare_image,
     prepare_qimage,
 )
+from ..core.models import ALL_GROUPS, EngineError, TranslateRequest as EngineRequest
+from ..core.pipeline import get_pipeline
 
 BATCH_INTERVAL = 0.05
 
@@ -46,6 +54,9 @@ class TranslationRequest:
     thumbnail: Optional[bytes] = None
     kind: str = "text"
     meta: dict = field(default_factory=dict)
+    glossary_group: Optional[str] = None   # None = 用设置里的开关
+    use_cache: bool = True
+    scene: str = "translate"
 
 
 def build_request(
@@ -58,6 +69,7 @@ def build_request(
     image_url: str = "",
     image_qimage: object = None,
     kind: str = "text",
+    scene: str = "translate",
 ) -> TranslationRequest:
     """按当前设置组装请求，供浮窗 / 剪贴板监听等非主页入口复用。"""
     return TranslationRequest(
@@ -75,6 +87,7 @@ def build_request(
         image_url=image_url,
         image_qimage=image_qimage,
         kind=kind,
+        scene=scene,
     )
 
 
@@ -82,6 +95,7 @@ class TranslationWorker(QThread):
     delta = pyqtSignal(str)
     first_token = pyqtSignal()
     stage = pyqtSignal(str)
+    notice = pyqtSignal(str)          # 缓存命中 / 已自动降级至 9B
     thumbnail_ready = pyqtSignal(object)
     done = pyqtSignal(str, int)
     failed = pyqtSignal(str, str)
@@ -95,6 +109,7 @@ class TranslationWorker(QThread):
         self._pending: list[str] = []
         self._emitted_any = False
         self._last_flush = 0.0
+        self._notices: set[str] = set()
 
     # ------------------------------------------------------------------ public
     def cancel(self) -> None:
@@ -125,6 +140,11 @@ class TranslationWorker(QThread):
         self._last_flush = time.monotonic()
         if chunk:
             self.delta.emit(chunk)
+
+    def _note(self, text: str) -> None:
+        if text and text not in self._notices:
+            self._notices.add(text)
+            self.notice.emit(text)
 
     # --------------------------------------------------------------------- run
     def run(self) -> None:  # noqa: C901 - linear, readable flow
@@ -161,36 +181,59 @@ class TranslationWorker(QThread):
                 self.thumbnail_ready.emit(thumbnail)
 
             self.stage.emit("正在翻译…")
-            result = translate(
+            model = request.model or str(settings.get("model", DEFAULT_MODEL))
+            use_glossary = bool(settings.get("use_glossary", True))
+            if request.glossary_group is not None:
+                group: Optional[str] = request.glossary_group
+            else:
+                group = ALL_GROUPS if use_glossary else None
+
+            engine_request = EngineRequest(
                 text=request.text,
-                image_data_url=image_data_url,
-                target_lang=request.target_lang,
-                source_lang=request.source_lang,
-                instruction=request.instruction,
-                glossary=request.glossary,
-                model=request.model,
-                api_base=request.api_base,
-                timeout=request.timeout,
-                stream=request.stream,
-                temperature=request.temperature,
-                cancel_event=self._cancel_event,
-                handle=self._handle,
-                on_delta=self._on_delta,
+                image_b64=(image_data_url or None),
+                source_lang=request.source_lang or "auto",
+                target_lang=request.target_lang or "zh",
+                instruction=request.instruction or "",
+                model=model,
+                glossary_group=group,
+                use_cache=bool(request.use_cache),
+                stream=bool(request.stream),
+                scene=request.scene or "translate",
+                extra={
+                    "api_base": request.api_base,
+                    "timeout": float(request.timeout or 120.0),
+                    "temperature": float(request.temperature or 0.0),
+                    "handle": self._handle,
+                    "use_glossary": use_glossary,
+                },
             )
+
+            pipeline = get_pipeline()
+            text_parts: list[str] = []
+            for chunk in pipeline.execute_stream(engine_request, self._cancel_event):
+                if chunk.from_cache:
+                    self._note("缓存命中")
+                if chunk.model_used and chunk.model_used != model:
+                    self._note(f"已自动降级至 {model_label(chunk.model_used)}")
+                if chunk.delta:
+                    text_parts.append(chunk.delta)
+                    self._on_delta(chunk.delta)
+
             self._flush()
+            result = "".join(text_parts)
 
             if self._cancel_event.is_set():
                 self.stopped.emit(result)
                 return
 
-            if not (result or "").strip():
+            if not result.strip():
                 self.failed.emit("服务没有返回译文。", "empty result")
                 return
 
             elapsed = int((time.monotonic() - started) * 1000)
             self.done.emit(result, elapsed)
 
-        except ApiError as exc:
+        except EngineError as exc:
             self._flush()
             if self._cancel_event.is_set():
                 self.stopped.emit("".join(self._pending))

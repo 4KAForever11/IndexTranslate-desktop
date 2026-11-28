@@ -1,20 +1,23 @@
-"""划词浮窗：在鼠标旁弹出一个轻量无边框小窗，流式显示译文。
+"""无边框流式划词浮窗。
 
-设计取舍：
-* 无边框 + 半透明 + 圆角 + 投影，视觉上像系统原生的取词气泡。
-* 点浮窗以外的区域不关闭（避免误触），用 Esc 或右上角关闭按钮退出。
-* 复制按钮、转到主窗口都在浮窗内完成，用户可以完全不回主窗口。
+设计目标：轻、快、不挡视线。
+
+* ``Tool`` 窗口标志 —— 不会在任务栏里多出一个图标，也不抢焦点。
+* **失焦即隐藏**（``WindowDeactivate``）并取消未完成的请求；右上角图钉可以锁定常驻。
+* 出现在光标右下方 14px，用 ``screenAt(pos).availableGeometry()`` 钳制，贴边时翻到另一侧，
+  不会露到屏幕外。
+* 正文流式渲染，底部小字提示「缓存命中」「已降级至 9B」——这些信息来自
+  ``TranslationPipeline`` 的分片，不是界面自己猜的。
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen
 from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
-    QLabel,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -22,6 +25,7 @@ from PyQt6.QtWidgets import (
 from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, PushButton, TransparentToolButton
 
 from ..core import settings
+from ..core.config import model_label
 from ..core.languages import display_name
 from ..workers.translation_worker import TranslationWorker, build_request
 from .theme import Divider, MutedLabel, StatusDot, TextLabel, colors, on_theme_changed
@@ -29,6 +33,7 @@ from .theme import Divider, MutedLabel, StatusDot, TextLabel, colors, on_theme_c
 MAX_OUTPUT_HEIGHT = 300
 MIN_OUTPUT_HEIGHT = 44
 POPUP_WIDTH = 460
+CURSOR_OFFSET = 14
 
 _BROWSER_QSS = """
 QTextBrowser {
@@ -70,6 +75,7 @@ class TranslatePopup(QWidget):
     """划词翻译浮窗。同一时间只跑一个翻译任务。"""
 
     openMainRequested = pyqtSignal(str)
+    pinnedChanged = pyqtSignal(bool)
 
     def __init__(self, glossary_provider=None, parent=None) -> None:
         super().__init__(
@@ -83,6 +89,8 @@ class TranslatePopup(QWidget):
         self._worker: TranslationWorker | None = None
         self._buffer: list[str] = []
         self._source_text = ""
+        self._notice = ""
+        self._pinned = bool(settings.get("popup_pinned", False))
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFixedWidth(POPUP_WIDTH + 24)
         self._build_ui()
@@ -109,9 +117,20 @@ class TranslatePopup(QWidget):
         header.setSpacing(8)
         self._title = TextLabel("划词翻译", size=12, bold=True)
         self._lang_label = MutedLabel("", size=11)
+        self._model_label = MutedLabel("", size=11)
         header.addWidget(self._title)
         header.addWidget(self._lang_label)
         header.addStretch(1)
+        header.addWidget(self._model_label)
+
+        self.pin_button = TransparentToolButton(FluentIcon.PIN)
+        self.pin_button.setFixedSize(24, 24)
+        self.pin_button.setCheckable(True)
+        self.pin_button.setChecked(self._pinned)
+        self.pin_button.setToolTip("图钉：锁定后点击外部不会关闭")
+        self.pin_button.toggled.connect(self._on_pin_toggled)
+        header.addWidget(self.pin_button)
+
         self.close_button = TransparentToolButton(FluentIcon.CLOSE)
         self.close_button.setFixedSize(24, 24)
         self.close_button.setToolTip("关闭（Esc）")
@@ -153,6 +172,7 @@ class TranslatePopup(QWidget):
         footer.addWidget(self.open_button)
         body.addLayout(footer)
 
+        self._refresh_pin_icon()
         self.apply_theme()
 
     def apply_theme(self) -> None:
@@ -168,12 +188,32 @@ class TranslatePopup(QWidget):
         self._surface.update()
         self.update()
 
+    # -------------------------------------------------------------------- 图钉
+    def _refresh_pin_icon(self) -> None:
+        self.pin_button.setIcon(FluentIcon.UNPIN if self._pinned else FluentIcon.PIN)
+        self.pin_button.setToolTip(
+            "已锁定：点击外部不会关闭" if self._pinned else "图钉：锁定后点击外部不会关闭"
+        )
+
+    def _on_pin_toggled(self, checked: bool) -> None:
+        self._pinned = bool(checked)
+        self._refresh_pin_icon()
+        settings.set("popup_pinned", self._pinned)
+        settings.save()
+        self.pinnedChanged.emit(self._pinned)
+
+    @property
+    def pinned(self) -> bool:
+        return self._pinned
+
     # ------------------------------------------------------------------ show
     def show_for(self, text: str, *, target_lang: str | None = None) -> None:
         """弹出并开始翻译。``text`` 为空时只提示，不发请求。"""
         text = (text or "").strip()
         self.stop()
         self._source_text = text
+        self._notice = ""
+        self._model_label.setText("")
         self.output.clear()
         self.copy_button.setEnabled(False)
 
@@ -181,9 +221,7 @@ class TranslatePopup(QWidget):
             self.source_label.setText("")
             self._set_status("没有取到选中的文字", colors()["warn"])
             self._place_near_cursor()
-            self.show()
-            self.raise_()
-            self.activateWindow()
+            self._show()
             return
 
         self.source_label.setText(text if len(text) <= 120 else text[:120] + "…")
@@ -192,10 +230,44 @@ class TranslatePopup(QWidget):
         self._set_status("正在翻译…", colors()["accent"])
         self._fit_output("正在翻译…")
         self._place_near_cursor()
+        self._show()
+        self._start_worker(text, code)
+
+    def _show(self) -> None:
         self.show()
         self.raise_()
-        self.activateWindow()
-        self._start_worker(text, code)
+        # 不抢焦点：抢焦点会让目标程序失去选区高亮，也容易触发失焦隐藏。
+        if self._pinned:
+            self.activateWindow()
+
+    def show_image(self, image, *, target_lang: str | None = None) -> None:
+        """框选截屏的结果直接进浮窗：不切窗口，也不经过剪贴板。"""
+        self.stop()
+        self._source_text = ""
+        self._notice = ""
+        self._model_label.setText("")
+        self.output.clear()
+        self.copy_button.setEnabled(False)
+
+        code = str(target_lang or settings.get("target_lang", "zh") or "zh")
+        self.source_label.setText("（框选图片）")
+        self._lang_label.setText(f"· {display_name(code)}")
+        self._set_status("正在识别图片…", colors()["accent"])
+        self._fit_output("正在识别图片…")
+        self._place_near_cursor()
+        self._show()
+
+        request = build_request(image_qimage=image, kind="image", target_lang=code, scene="popup")
+        worker = TranslationWorker(request, self)
+        worker.delta.connect(self._on_delta)
+        worker.notice.connect(self._on_notice)
+        worker.done.connect(self._on_done)
+        worker.failed.connect(self._on_failed)
+        worker.stopped.connect(self._on_stopped)
+        worker.finished.connect(self._on_finished)
+        self._worker = worker
+        self._buffer.clear()
+        worker.start()
 
     def _start_worker(self, text: str, code: str) -> None:
         glossary = ""
@@ -205,9 +277,10 @@ class TranslatePopup(QWidget):
             except Exception:
                 glossary = ""
 
-        request = build_request(text=text, glossary=glossary, target_lang=code)
+        request = build_request(text=text, glossary=glossary, target_lang=code, scene="popup")
         worker = TranslationWorker(request, self)
         worker.delta.connect(self._on_delta)
+        worker.notice.connect(self._on_notice)
         worker.done.connect(self._on_done)
         worker.failed.connect(self._on_failed)
         worker.stopped.connect(self._on_stopped)
@@ -220,6 +293,19 @@ class TranslatePopup(QWidget):
     def _on_delta(self, chunk: str) -> None:
         self._buffer.append(chunk)
         self._render("".join(self._buffer))
+
+    def _on_notice(self, text: str) -> None:
+        """管道给的提示：缓存命中 / 已自动降级。"""
+        self._notice = text
+        if text.startswith("已自动降级"):
+            self._model_label.setText(text.replace("已自动降级至 ", ""))
+        self._set_status(self._status_text(), colors()["muted"] if text == "缓存命中" else colors()["warn"])
+
+    def _status_text(self) -> str:
+        base = "正在翻译…" if self._worker is not None else ""
+        if self._notice and base:
+            return f"{base} · {self._notice}"
+        return self._notice or base
 
     def _render(self, text: str) -> None:
         self._fit_output(text)
@@ -244,7 +330,8 @@ class TranslatePopup(QWidget):
     def _on_done(self, text: str, elapsed_ms: int) -> None:
         self._render(text)
         self.copy_button.setEnabled(bool(text.strip()))
-        self._set_status(f"完成 · {elapsed_ms / 1000:.1f}s", colors()["ok"])
+        suffix = f" · {self._notice}" if self._notice else ""
+        self._set_status(f"完成 · {elapsed_ms / 1000:.1f}s{suffix}", colors()["ok"])
 
     def _on_failed(self, message: str, detail: str) -> None:
         self._fit_output(message)
@@ -297,21 +384,32 @@ class TranslatePopup(QWidget):
 
     # ------------------------------------------------------------------ layout
     def _place_near_cursor(self) -> None:
-        """出现在鼠标右下角；贴近屏幕边缘时自动翻到另一侧。"""
+        """出现在鼠标右下方；贴近屏幕边缘时翻到另一侧，绝不露到屏幕外。"""
         self.adjustSize()
         anchor = QCursor.pos()
         screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
         area = screen.availableGeometry()
         width, height = self.width(), self.height()
-        x = anchor.x() + 16
-        y = anchor.y() + 20
+        x = anchor.x() + CURSOR_OFFSET
+        y = anchor.y() + CURSOR_OFFSET + 6
         if x + width > area.right():
-            x = max(area.left(), anchor.x() - width - 16)
+            x = anchor.x() - width - CURSOR_OFFSET
         if y + height > area.bottom():
-            y = max(area.top(), anchor.y() - height - 16)
-        self.move(QPoint(x, y))
+            y = anchor.y() - height - CURSOR_OFFSET
+        x = max(area.left(), min(x, area.right() - width))
+        y = max(area.top(), min(y, area.bottom() - height))
+        self.move(QPoint(int(x), int(y)))
 
     # ------------------------------------------------------------------ events
+    def event(self, event) -> bool:  # noqa: N802
+        # 失焦自动隐藏：点外部就走，但被图钉锁定时保持常驻。
+        if event.type() == QEvent.Type.WindowDeactivate and not self._pinned:
+            if self.isVisible():
+                self.dismiss()
+        return super().event(event)
+
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape:
             self.dismiss()
@@ -321,3 +419,7 @@ class TranslatePopup(QWidget):
     def hideEvent(self, event) -> None:  # noqa: N802
         self.stop()
         super().hideEvent(event)
+
+
+# 旧名字保留，避免外部引用（托盘 / 主窗口）因为改名而断掉。
+__all__ = ["TranslatePopup", "MAX_OUTPUT_HEIGHT", "MIN_OUTPUT_HEIGHT", "POPUP_WIDTH"]

@@ -1,0 +1,14 @@
+{
+  "id": "ext-ocr-overlay",
+  "name": "本地 OCR 原位贴片",
+  "version": "1.0.0",
+  "entry": "main.py",
+  "host_min": "2.0.0",
+  "description": "RapidOCR 本地识别截图文字并返回坐标，宿主在原位置绘制译文贴片，支持原文/译文透视切换。",
+  "methods": [
+    "ping",
+    "ocr",
+    "ocr_b64"
+  ],
+  "size_hint": "30–45 MB"
+}

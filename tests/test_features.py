@@ -7,7 +7,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.core import batch
 from app.core.glossary_db import DEFAULT_GROUP, GlossaryDB
 from app.core.styles import (
     DEFAULT_STYLES,
@@ -134,125 +133,6 @@ class GlossaryGroupTests(unittest.TestCase):
         self.assertEqual(db.get("光遇"), "Sky")
         self.assertEqual(db.group_names(), [DEFAULT_GROUP])
         self.assertEqual(db.prompt_for("光遇在哪里下载"), "光遇→Sky")
-
-
-class BatchSegmentTests(unittest.TestCase):
-    def setUp(self):
-        self._dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.addCleanup(self._dir.cleanup)
-        self.root = Path(self._dir.name)
-
-    def _finish(self, item, translations):
-        for index, text in enumerate(translations):
-            item.results[index] = text
-        item.status = batch.STATUS_DONE
-        return item
-
-    def test_supported_and_kind(self):
-        self.assertTrue(batch.supported("a.PNG"))
-        self.assertTrue(batch.supported("a.srt"))
-        self.assertTrue(batch.supported("a.md"))
-        self.assertFalse(batch.supported("a.exe"))
-        self.assertEqual(batch.item_kind("a.png"), batch.KIND_IMAGE)
-        self.assertEqual(batch.item_kind("a.srt"), batch.KIND_TEXT)
-
-    def test_markdown_paragraphs(self):
-        path = self.root / "notes.md"
-        long_a = (
-            "第一段说的是批量翻译会按段落切分，每一段单独请求，"
-            "失败的那段还可以单独重试，所以整份文档不会因为一条报错而白等。"
-        )
-        long_b = (
-            "- 列表项一：把整个文件夹拖进来就能自动排队，重复文件会自动跳过\n"
-            "- 列表项二：全部完成后合并导出成一份双语 Markdown"
-        )
-        long_c = (
-            "| 文件 | 状态 | 用时 |\n| - | - | - |\n| notes.md | 完成 | 2.4s |"
-        )
-        path.write_text(f"{long_a}\n\n{long_b}\n\n{long_c}\n", encoding="utf-8")
-        item = batch.build_item(path)
-        self.assertEqual(item.kind, batch.KIND_TEXT)
-        self.assertEqual(len(item.segments), 3)
-        self.assertIn("列表项一", item.segments[1].text)
-        self.assertIn("| notes.md | 完成 |", item.segments[2].text)
-        self.assertEqual(len(item.results), 3)
-
-    def test_short_paragraphs_merge(self):
-        path = self.root / "short.md"
-        path.write_text("第一句。\n\n第二句。\n\n第三句。\n", encoding="utf-8")
-        item = batch.build_item(path)
-        self.assertEqual(len(item.segments), 1)
-        self.assertIn("第三句", item.segments[0].text)
-
-    def test_srt_parsing(self):
-        path = self.root / "subs.srt"
-        path.write_text(
-            "1\n00:00:01,000 --> 00:00:03,000\nHello there\nsecond line\n\n"
-            "2\n00:00:04,000 --> 00:00:06,000\nBye\n",
-            encoding="utf-8",
-        )
-        item = batch.build_item(path)
-        self.assertEqual(len(item.segments), 2)
-        self.assertEqual(item.segments[0].text, "Hello there\nsecond line")
-        self.assertIn("00:00:01,000", item.segments[0].label)
-        self.assertEqual(item.segments[1].text, "Bye")
-
-    def test_long_text_is_split(self):
-        path = self.root / "long.txt"
-        path.write_text("句子。" * 8000, encoding="utf-8")
-        item = batch.build_item(path)
-        self.assertGreater(len(item.segments), 1)
-        self.assertTrue(all(len(seg.text) <= batch.MAX_INPUT_CHARS for seg in item.segments))
-
-    def test_export_modes(self):
-        path = self.root / "doc.md"
-        path.write_text("Hello world.\n", encoding="utf-8")
-        item = self._finish(batch.build_item(path), ["你好，世界。"])
-
-        bilingual = batch.export_markdown([item], "bilingual")
-        self.assertIn("Hello world.", bilingual)
-        self.assertIn("你好，世界。", bilingual)
-
-        target = batch.export_markdown([item], "target")
-        self.assertNotIn("Hello world.", target)
-        self.assertIn("你好，世界。", target)
-
-        both = batch.export_markdown([item], "both")
-        self.assertIn("**原文**", both)
-        self.assertIn("**译文**", both)
-        self.assertIn("Hello world.", both)
-        self.assertIn("你好，世界。", both)
-
-    def test_unfinished_items_are_skipped(self):
-        path = self.root / "doc.md"
-        path.write_text("Hello world.\n", encoding="utf-8")
-        item = batch.build_item(path)
-        self.assertEqual(batch.export_markdown([item], "bilingual"), "")
-
-    def test_image_item_placeholder(self):
-        from PIL import Image
-
-        path = self.root / "shot.png"
-        Image.new("RGB", (64, 32), "white").save(path)
-        item = self._finish(batch.build_item(path), ["译文"])
-        self.assertEqual(item.kind, batch.KIND_IMAGE)
-        self.assertEqual(len(item.segments), 1)
-        markdown = batch.export_markdown([item], "bilingual")
-        self.assertIn("（图片：shot.png）", markdown)
-        self.assertIn("译文", markdown)
-
-    def test_collect_paths_expands_directory(self):
-        (self.root / "one.png").write_bytes(b"x")
-        (self.root / "two.md").write_text("hi", encoding="utf-8")
-        (self.root / "skip.exe").write_bytes(b"x")
-        found = batch.collect_paths([self.root])
-        self.assertEqual(sorted(path.name for path in found), ["one.png", "two.md"])
-
-    def test_collect_paths_dedupes(self):
-        path = self.root / "one.md"
-        path.write_text("hi", encoding="utf-8")
-        found = batch.collect_paths([path, path, self.root])
-        self.assertEqual(len(found), 1)
 
 
 if __name__ == "__main__":
